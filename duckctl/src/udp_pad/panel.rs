@@ -13,8 +13,9 @@ use std::collections::VecDeque;
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
+use duck_ipc_proto as proto;
 use pad_map::Buttons;
-use pad_map::wire::Packet;
+use pad_map::wire::{Packet, RobotReport};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -75,7 +76,122 @@ pub struct View<'a> {
     pub rate: Option<u32>,
     pub failed: u64,
     pub link: &'a Link,
+    /// The robot as `netpadd` last reported it, and how long ago that was.
+    pub robot: Option<(&'a RobotReport, Duration)>,
     pub now: Instant,
+}
+
+/// A robot report older than this is shown as stale: `netpadd` sends one a second.
+const REPORT_STALE: Duration = Duration::from_secs(3);
+
+/// How bad an alarm is. Red is something broken or about to be; yellow is worth knowing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Warn,
+    Alarm,
+}
+
+impl Level {
+    pub fn mark(self) -> &'static str {
+        match self {
+            Self::Warn => "⚠",
+            Self::Alarm => "✕",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            Self::Warn => Style::new().fg(Color::Yellow),
+            Self::Alarm => Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        }
+    }
+}
+
+/// One thing wrong with the robot, keyed so a change of level can be told from a number moving.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alarm {
+    pub key: &'static str,
+    pub level: Level,
+    pub text: String,
+}
+
+/// What is wrong with the robot, by the same rules `robotctl monitor` colours its power row by:
+/// thresholds are `robotd`'s or `proto`'s, never invented here — which is why a servo's
+/// temperature is shown but never raises one.
+pub fn alarms(r: &RobotReport) -> Vec<Alarm> {
+    let mut out = Vec::new();
+    let mut push = |key, level, text: String| out.push(Alarm { key, level, text });
+    if let Some(h) = &r.health {
+        if !h.healthy {
+            let reason = h.reason.as_deref().unwrap_or("no reason given");
+            if h.degraded {
+                push("health", Level::Warn, format!("robot degraded: {reason}"));
+            } else {
+                push("health", Level::Alarm, format!("robot unhealthy: {reason}"));
+            }
+        }
+        if let Some(b) = &h.battery {
+            if b.percent <= proto::Battery::CRITICAL_PCT {
+                push(
+                    "battery",
+                    Level::Alarm,
+                    format!("battery critical: {:.0}%", b.percent),
+                );
+            } else if b.percent <= proto::Battery::LOW_PCT {
+                push(
+                    "battery",
+                    Level::Warn,
+                    format!("battery low: {:.0}%", b.percent),
+                );
+            }
+        }
+        if !h.bus.missing.is_empty() {
+            push(
+                "motors",
+                Level::Alarm,
+                format!("motors not answering: {}", h.bus.describe_missing()),
+            );
+        } else if h.bus.consecutive_errors > 0 {
+            push(
+                "motors",
+                Level::Warn,
+                format!(
+                    "motor bus: {} read failures running",
+                    h.bus.consecutive_errors
+                ),
+            );
+        }
+        if let Some(imu) = &h.imu {
+            if imu.missing {
+                push("imu", Level::Alarm, "IMU missing".to_owned());
+            } else if imu.frozen() {
+                push(
+                    "imu",
+                    Level::Alarm,
+                    format!(
+                        "orientation frozen: {} stale reads",
+                        imu.consecutive_stale_blocks
+                    ),
+                );
+            }
+        }
+        if let Some(t) = h.cpu_throttle.filter(proto::CpuThrottle::throttled) {
+            push(
+                "cpu",
+                Level::Warn,
+                format!("cpu throttled to {} MHz", t.khz / 1000),
+            );
+        }
+    }
+    if let Some(p) = &r.posture {
+        if p.fallen {
+            push("fallen", Level::Alarm, "the robot has fallen".to_owned());
+        }
+        if p.limp {
+            push("limp", Level::Warn, "the robot is limp".to_owned());
+        }
+    }
+    out
 }
 
 /// Whether this laptop reaches the duck, in one word — the first thing the frame says.
@@ -194,8 +310,23 @@ pub fn summary(v: &View) -> String {
         }
     }
     let rate = v.rate.map_or("—".to_owned(), |r| r.to_string());
+    let robot = match v.robot {
+        None => "robot: no health".to_owned(),
+        Some((r, _)) => {
+            let alarms = alarms(r);
+            if alarms.is_empty() {
+                "robot ok".to_owned()
+            } else {
+                let said: Vec<_> = alarms
+                    .iter()
+                    .map(|a| format!("{} {}", a.level.mark(), a.text))
+                    .collect();
+                format!("robot {}", said.join(" · "))
+            }
+        }
+    };
     format!(
-        "{duck} | {} | {rate} Hz of {} → {} · {} failed",
+        "{duck} | {robot} | {} | {rate} Hz of {} → {} · {} failed",
         pad_words(v),
         v.hz,
         v.to,
@@ -312,13 +443,15 @@ impl Drop for Screen {
 }
 
 fn render(frame: &mut ratatui::Frame, v: &View, log: &VecDeque<String>) {
-    let [duck_area, pad_area, log_area] = Layout::vertical([
+    let [duck_area, robot_area, pad_area, log_area] = Layout::vertical([
         Constraint::Length(5),
+        Constraint::Length(7),
         Constraint::Length(7),
         Constraint::Min(3),
     ])
     .areas(frame.area());
     render_duck(frame, v, duck_area);
+    render_robot(frame, v, robot_area);
     render_pad(frame, v, pad_area);
 
     let block = Block::bordered()
@@ -398,6 +531,186 @@ fn render_duck(frame: &mut ratatui::Frame, v: &View, area: Rect) {
             .style(Style::new().fg(Color::Cyan)),
         spark,
     );
+}
+
+/// A label column, nine wide like the monitor's rows.
+fn row(label: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
+    spans.insert(0, Span::raw(format!(" {label:<9}")));
+    Line::from(spans)
+}
+
+/// `text` in the colour of the worst alarm under `key`, plain when there is none.
+fn flagged(text: String, key: &str, alarms: &[Alarm]) -> Span<'static> {
+    match alarms.iter().find(|a| a.key == key) {
+        Some(a) => Span::styled(text, a.level.style()),
+        None => Span::raw(text),
+    }
+}
+
+/// The robot itself: power, motors, posture, health, and what it last refused.
+fn render_robot(frame: &mut ratatui::Frame, v: &View, area: Rect) {
+    let mut title = vec![Span::raw(" robot ")];
+    let Some((report, age)) = v.robot else {
+        let why = if v.link.state(v.now) == State::Busy {
+            " only the client driving the duck is sent its health"
+        } else {
+            " no health from netpadd yet — it sends one a second to the driving client"
+        };
+        let block = Block::bordered().title(Line::from(title));
+        frame.render_widget(Paragraph::new(Line::from(why).dim()).block(block), area);
+        return;
+    };
+    let alarms = alarms(report);
+    let worst = alarms.iter().map(|a| a.level).max();
+    let stale = age >= REPORT_STALE;
+    let h = report.health.as_ref();
+    title.push(match h {
+        Some(h) if h.healthy => Span::styled("healthy", Style::new().fg(Color::Green).bold()),
+        Some(h) if h.degraded => Span::styled("degraded", Level::Warn.style()),
+        Some(_) => Span::styled("unhealthy", Level::Alarm.style()),
+        None => Span::raw("no health").dim(),
+    });
+    if stale {
+        title.push(Span::styled(
+            format!(" · {} s old", age.as_secs()),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    title.push(Span::raw(" "));
+    let border = match (stale, worst) {
+        (true, _) => Style::new().fg(Color::Yellow),
+        (false, Some(l)) => Style::new().fg(l.style().fg.unwrap_or(Color::Reset)),
+        (false, None) if h.is_some() => Style::new().fg(Color::Green),
+        _ => Style::new(),
+    };
+    let block = Block::bordered()
+        .border_style(border)
+        .title(Line::from(title));
+
+    let dim = |t: String| Span::raw(t).dim();
+    let mut lines = Vec::new();
+    match h {
+        None => {
+            let why = report.health_error.as_deref().unwrap_or("not reported");
+            lines.push(row(
+                "power",
+                vec![dim(format!("no health from robotd — {why}"))],
+            ));
+            lines.push(row("motors", vec![dim("—".to_owned())]));
+        }
+        Some(h) => {
+            let mut power = vec![match &h.battery {
+                Some(b) => {
+                    let text = format!("batt {:.2} V {:.0}%", b.volts, b.percent);
+                    match alarms.iter().find(|a| a.key == "battery") {
+                        Some(a) => Span::styled(text, a.level.style()),
+                        None => Span::styled(text, Style::new().fg(Color::Green)),
+                    }
+                }
+                // Absent is not measured, never an empty pack.
+                None => dim("batt not read yet".to_owned()),
+            }];
+            if let Some(c) = h.cpu_temp_c {
+                power.push(Span::raw(" · "));
+                power.push(Span::raw(format!("cpu {c:.0} °C")));
+            }
+            if let Some(t) = h.cpu_throttle.filter(proto::CpuThrottle::throttled) {
+                power.push(flagged(
+                    format!(" throttled to {} MHz", t.khz / 1000),
+                    "cpu",
+                    &alarms,
+                ));
+            }
+            if let Some(l) = &h.control_loop {
+                let achieved = l
+                    .achieved_hz
+                    .map_or("—".to_owned(), |hz| format!("{hz:.1}"));
+                power.push(Span::raw(format!(
+                    " · loop {achieved}/{:.0} Hz",
+                    l.target_hz
+                )));
+            }
+            lines.push(row("power", power));
+
+            let mut motors = Vec::new();
+            if let Some(m) = &h.motors {
+                motors.push(Span::raw(format!(
+                    "hottest {} {:.0} °C · mean {:.0} °C · ",
+                    m.hottest, m.max_c, m.mean_c
+                )));
+            }
+            motors.push(match alarms.iter().find(|a| a.key == "motors") {
+                Some(a) => Span::styled(a.text.clone(), a.level.style()),
+                None => Span::styled("bus ok", Style::new().fg(Color::Green)),
+            });
+            lines.push(row("motors", motors));
+        }
+    }
+
+    lines.push(row(
+        "pose",
+        match &report.posture {
+            None => {
+                let why = report.posture_error.as_deref().unwrap_or("not reported");
+                vec![dim(format!("no state from robotd — {why}"))]
+            }
+            Some(p) => {
+                let mut pose = vec![Span::styled(
+                    p.policy.clone(),
+                    Style::new().fg(Color::Cyan).bold(),
+                )];
+                pose.push(Span::raw(" · "));
+                pose.push(if p.fallen {
+                    Span::styled("FALLEN", Level::Alarm.style())
+                } else {
+                    Span::raw("upright")
+                });
+                if p.limp {
+                    pose.push(Span::styled(" · limp", Level::Warn.style()));
+                }
+                if p.picked_up {
+                    pose.push(Span::styled(" · held", Style::new().fg(Color::Yellow)));
+                }
+                if let Some(imu) = h.and_then(|h| h.imu.as_ref()) {
+                    pose.push(Span::raw(" · "));
+                    pose.push(match alarms.iter().find(|a| a.key == "imu") {
+                        Some(a) => Span::styled(a.text.clone(), a.level.style()),
+                        None if imu.ready => Span::raw("imu ok"),
+                        None => dim("imu settling".to_owned()),
+                    });
+                }
+                pose
+            }
+        },
+    ));
+
+    lines.push(row(
+        "health",
+        match h {
+            None => vec![dim("—".to_owned())],
+            Some(h) if h.healthy => vec![Span::styled("healthy", Style::new().fg(Color::Green))],
+            Some(_) => match alarms.iter().find(|a| a.key == "health") {
+                Some(a) => vec![Span::styled(a.text.clone(), a.level.style())],
+                None => vec![dim("not healthy".to_owned())],
+            },
+        },
+    ));
+
+    lines.push(row(
+        "refused",
+        match &report.refused {
+            None => vec![dim("nothing".to_owned())],
+            Some(r) => vec![
+                Span::styled(
+                    format!("{} — {}", r.method, r.reason),
+                    Style::new().fg(Color::Yellow),
+                ),
+                dim(format!(" · {} s ago", (r.ago_ms / 1000) + age.as_secs())),
+            ],
+        },
+    ));
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// The pad, what it holds, and how fast it goes out.
@@ -545,12 +858,13 @@ mod tests {
             rate: Some(30),
             failed: 0,
             link,
+            robot: None,
             now: Instant::now(),
         }
     }
 
     fn screen(v: &View) -> String {
-        let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(100, 28)).unwrap();
         t.draw(|f| render(f, v, &VecDeque::from(["a notice".to_owned()])))
             .unwrap();
         let buf = t.backend().buffer();
@@ -583,6 +897,90 @@ mod tests {
         assert!(s.contains(" START ") && s.contains(" B "), "{s}");
         assert!(s.contains("connecting"), "{s}");
         assert!(s.contains("a notice"), "{s}");
+    }
+
+    fn sick_robot() -> RobotReport {
+        RobotReport {
+            health: Some(proto::HealthResult {
+                healthy: false,
+                reason: Some("motor bus not answering".to_owned()),
+                battery: Some(proto::Battery {
+                    volts: 6.9,
+                    percent: 12.0,
+                }),
+                cpu_temp_c: Some(71.0),
+                motors: Some(proto::MotorThermal {
+                    hottest: "left_knee".to_owned(),
+                    max_c: 58.0,
+                    mean_c: 44.0,
+                }),
+                bus: proto::BusHealth {
+                    missing: vec![10],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            posture: Some(pad_map::wire::Posture {
+                policy: "stand".to_owned(),
+                fallen: true,
+                ..Default::default()
+            }),
+            refused: Some(pad_map::wire::Refusal {
+                method: "robot.do".to_owned(),
+                reason: "not home yet".to_owned(),
+                ago_ms: 2_000,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_sick_robot_raises_red_for_what_is_broken_and_nothing_for_a_warm_servo() {
+        let keys: Vec<_> = alarms(&sick_robot())
+            .into_iter()
+            .map(|a| (a.key, a.level))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("health", Level::Alarm),
+                ("battery", Level::Alarm),
+                ("motors", Level::Alarm),
+                ("fallen", Level::Alarm),
+            ]
+        );
+        let healthy = RobotReport {
+            health: Some(proto::HealthResult {
+                healthy: true,
+                battery: Some(proto::Battery {
+                    volts: 7.8,
+                    percent: 80.0,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(alarms(&healthy).is_empty());
+        // Nothing known is nothing wrong — not an empty battery.
+        assert!(alarms(&RobotReport::default()).is_empty());
+    }
+
+    #[test]
+    fn the_robot_block_shows_power_motors_pose_and_refusals() {
+        let link = Link::default();
+        let r = sick_robot();
+        let mut v = view(&link, None);
+        v.robot = Some((&r, Duration::from_millis(200)));
+        let s = screen(&v);
+        assert!(s.contains("unhealthy"), "{s}");
+        assert!(
+            s.contains("batt 6.90 V 12%") && s.contains("cpu 71 °C"),
+            "{s}"
+        );
+        assert!(s.contains("hottest left_knee 58 °C"), "{s}");
+        assert!(s.contains("motors not answering: 10"), "{s}");
+        assert!(s.contains("stand · FALLEN"), "{s}");
+        assert!(s.contains("robot.do — not home yet"), "{s}");
     }
 
     #[test]

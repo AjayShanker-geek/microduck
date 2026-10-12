@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use gilrs::{Axis, Button, GamepadId, Gilrs, PowerInfo};
 use pad_map::Buttons;
-use pad_map::wire::{DEFAULT_PORT, Packet, Status};
+use pad_map::wire::{DEFAULT_PORT, Packet, RobotReport, Status};
 
 mod link;
 mod panel;
@@ -69,6 +69,10 @@ pub struct Notices {
     last_failure: Option<Instant>,
     /// The duck's answers as last said, `None` before the first look.
     link: Option<State>,
+    /// The robot's alarms as last said.
+    alarms: Vec<(&'static str, panel::Level)>,
+    /// The last refusal said, and when the robot made it.
+    refused: Option<(String, String, Instant)>,
 }
 
 impl Notices {
@@ -123,6 +127,47 @@ impl Notices {
 }
 
 impl Notices {
+    /// What changed in the robot's report worth a line: an alarm raised, made worse or cleared,
+    /// and each new refusal. A number moving inside one level is not news.
+    pub fn robot(&mut self, report: &RobotReport, at: Instant) -> Vec<String> {
+        let mut lines = Vec::new();
+        let now: Vec<panel::Alarm> = panel::alarms(report);
+        for alarm in &now {
+            let was = self
+                .alarms
+                .iter()
+                .find(|(k, _)| *k == alarm.key)
+                .map(|(_, l)| *l);
+            if was != Some(alarm.level) {
+                lines.push(format!("{} {}", alarm.level.mark(), alarm.text));
+            }
+        }
+        for (key, _) in &self.alarms {
+            if !now.iter().any(|a| a.key == *key) {
+                lines.push(format!("✓ {key} back to normal"));
+            }
+        }
+        self.alarms = now.iter().map(|a| (a.key, a.level)).collect();
+
+        if let Some(r) = &report.refused {
+            let happened = at
+                .checked_sub(Duration::from_millis(r.ago_ms))
+                .unwrap_or(at);
+            // The same refusal comes back in every report for a while; its time is what tells a
+            // new one from the same one again — within a report's worth of drift.
+            let new = self.refused.as_ref().is_none_or(|(m, why, when)| {
+                *m != r.method
+                    || *why != r.reason
+                    || happened.saturating_duration_since(*when) > Duration::from_millis(500)
+            });
+            if new {
+                lines.push(format!("refused: {} — {}", r.method, r.reason));
+                self.refused = Some((r.method.clone(), r.reason.clone(), happened));
+            }
+        }
+        lines
+    }
+
     /// Whether the duck is connected, once per change of kind. Led by the same verdict the
     /// panel shows, so a scrolled-back log reads the same as the screen.
     pub fn link(&mut self, to: &str, state: State) -> Option<String> {
@@ -194,6 +239,8 @@ impl Rate {
 /// ICMP refusal a connected socket reports, which may land here rather than on a send.
 enum Heard {
     Status(Status, Instant),
+    /// Decoded here, on the listening thread, so the send loop never parses JSON.
+    Report(Box<RobotReport>, Instant),
     Failed(std::io::ErrorKind),
 }
 
@@ -203,12 +250,16 @@ fn listen(socket: &UdpSocket) -> std::io::Result<mpsc::Receiver<Heard>> {
     let socket = socket.try_clone()?;
     let (tx, rx) = mpsc::sync_channel(64);
     std::thread::spawn(move || {
-        let mut b = [0u8; 64];
+        // A robot report is a few hundred bytes of JSON; a datagram cut short would not parse.
+        let mut b = [0u8; 2048];
         loop {
             let heard = match socket.recv(&mut b) {
                 Ok(n) => match Status::decode(&b[..n]) {
                     Ok(s) => Heard::Status(s, Instant::now()),
-                    Err(_) => continue,
+                    Err(_) => match RobotReport::decode(&b[..n]) {
+                        Ok(r) => Heard::Report(Box::new(r), Instant::now()),
+                        Err(_) => continue,
+                    },
                 },
                 Err(e) => {
                     // A persistent error must not spin a core.
@@ -250,6 +301,8 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
     let mut notices = Notices::default();
     let (mut link, mut rate, mut failed) = (Link::default(), Rate::default(), 0u64);
     let mut last_input = None::<(GamepadId, Instant)>;
+    // The robot as `netpadd` last reported it, and when that report landed.
+    let mut robot = None::<(RobotReport, Instant)>;
     let mut screen = Screen::open();
     let mut shown = None::<Instant>;
     let say = |screen: &mut Option<Screen>, line: String| match screen {
@@ -271,6 +324,12 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
         while let Ok(heard) = answers.try_recv() {
             match heard {
                 Heard::Status(s, at) => link.on_status(s, at),
+                Heard::Report(r, at) => {
+                    for line in notices.robot(&r, at) {
+                        say(&mut screen, line);
+                    }
+                    robot = Some((*r, at));
+                }
                 Heard::Failed(std::io::ErrorKind::ConnectionRefused) => {
                     link.on_refused(Instant::now());
                 }
@@ -370,6 +429,9 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 rate: rate.last,
                 failed,
                 link: &link,
+                robot: robot
+                    .as_ref()
+                    .map(|(r, at)| (r, now.saturating_duration_since(*at))),
                 now,
             };
             match &mut screen {
@@ -488,6 +550,59 @@ mod tests {
             n.link(to, State::Busy)
                 .is_some_and(|m| m.starts_with("✕ REFUSED"))
         );
+    }
+
+    /// An alarm is said when it is raised and when it clears, not on every report; a refusal
+    /// once, however many reports carry it.
+    #[test]
+    fn the_robot_is_said_once_per_alarm_and_once_per_refusal() {
+        use duck_ipc_proto as proto;
+        let t = Instant::now();
+        let at = |ms: u64| t + Duration::from_millis(ms);
+        let battery = |percent| RobotReport {
+            health: Some(proto::HealthResult {
+                healthy: true,
+                battery: Some(proto::Battery {
+                    volts: 7.0,
+                    percent,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut n = Notices::default();
+        assert!(n.robot(&battery(80.0), at(0)).is_empty());
+        assert_eq!(n.robot(&battery(25.0), at(1_000)), ["⚠ battery low: 25%"]);
+        assert!(
+            n.robot(&battery(24.0), at(2_000)).is_empty(),
+            "a number moving"
+        );
+        assert_eq!(
+            n.robot(&battery(12.0), at(3_000)),
+            ["✕ battery critical: 12%"]
+        );
+        assert_eq!(
+            n.robot(&battery(80.0), at(4_000)),
+            ["✓ battery back to normal"]
+        );
+
+        let refused = |ago_ms| RobotReport {
+            refused: Some(pad_map::wire::Refusal {
+                method: "robot.do".to_owned(),
+                reason: "not home yet".to_owned(),
+                ago_ms,
+            }),
+            ..battery(80.0)
+        };
+        assert_eq!(
+            n.robot(&refused(100), at(5_000)),
+            ["refused: robot.do — not home yet"]
+        );
+        assert!(
+            n.robot(&refused(1_100), at(6_000)).is_empty(),
+            "the same one"
+        );
+        assert_eq!(n.robot(&refused(50), at(7_000)).len(), 1, "a new one");
     }
 
     #[test]

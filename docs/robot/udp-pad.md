@@ -87,6 +87,13 @@ On a terminal it takes the screen, as `robotctl monitor` does, and `q` quits:
 │ rtt 3.1 ms · loss 0.0% · 0 stale                                            │
 │ rtt ms    ▁▁▁▁▂▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁                                       │
 └ rtt ≤50 ms ─────────────────────────────────────────────────────────────────┘
+┌ robot healthy ──────────────────────────────────────────────────────────────┐
+│ power    batt 7.62 V 61% · cpu 71 °C · loop 50.0/50 Hz                      │
+│ motors   hottest left_knee 58 °C · mean 44 °C · bus ok                      │
+│ pose     walk · upright · imu ok                                            │
+│ health   healthy                                                            │
+│ refused  robot.do — not home yet · 3 s ago                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ┌ pad Xbox 360 Controller · battery 70% ──────────────────────────────────────┐
 │ left   X  ·······│·······  +0.00   Y  ·······│████···  +0.50                │
 │ right  X  ·······│·······  +0.00   Y  ·······│·······  +0.00                │
@@ -111,6 +118,15 @@ from the robot's [answers](#what-the-robot-answers):
 | `✕ NOT CONNECTED` — nothing listening | the robot's address refuses the port: `netpadd` is not running there, or `[netpad] enabled` is off |
 | `✕ NOT CONNECTED` — stopped answering | there were answers and they stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
 | `✕ NOT CONNECTED` — nothing answers | sends go out and nothing has ever come back: a wrong address, a firewall, or a `netpadd` older than its answers — which still drives |
+
+The robot block is the robot's own `robot.health` and posture, the same facts as `robotctl health`
+and the monitor's power row, and coloured by the same rules. Red: unhealthy, a battery at 15% or
+less, motors not answering, an IMU missing or frozen, a fall. Yellow: degraded, a battery at 30% or
+less, motor bus read failures, a throttled CPU, limp. A servo's temperature is shown but never
+coloured, because nothing on the robot defines one as too hot. `refused` is the last thing you
+asked for that the robot would not do, and why — the answer to "I pressed it and nothing
+happened". Each alarm, when raised and when cleared, and each refusal also goes to the log. Only
+the client driving the duck is sent any of this.
 
 Piped to a file, it writes the same facts as one line every 10 seconds instead.
 
@@ -199,6 +215,29 @@ answer longer than 24 bytes is a version-1 answer with fields this reader does n
 
 The answer is sent without waiting: when the socket's buffer is full, or the client cannot be
 reached, it is dropped, and the receive loop never slows for it.
+
+### The robot's health
+
+Every second, and at once when a client takes the robot, `netpadd` sends the driving client a second
+kind of datagram: `b"DKRB"`, the version byte `1`, then a JSON object. Every field may be absent,
+and absent means *not known*, never zero:
+
+| field | what |
+|---|---|
+| `health` | `robot.health` as `robotd` answered it: `healthy`, `degraded`, `reason`, `battery`, `motors`, `cpu_temp_c`, `cpu_throttle`, `control_loop`, `bus`, `imu` |
+| `health_error` | why there is no `health` — `robotd` not answering |
+| `posture` | `policy`, `fallen`, `limp`, `picked_up`, from `robot.state` |
+| `posture_error` | why there is no `posture` |
+| `refused` | the last pad request the robot did not carry out in the past 30 s: `method`, `reason`, `ago_ms` |
+
+```json
+{"health":{"healthy":true,"battery":{"volts":7.62,"percent":61.0},"cpu_temp_c":71.2,"bus":{"consecutive_errors":0,"startup_failures":0}},
+ "posture":{"policy":"walk","fallen":false,"limp":false,"picked_up":false}}
+```
+
+`netpadd` gathers it on connections to `robotd` of its own, so a slow answer never holds up the
+pad, and a `robotd` that cannot be reached is a `health_error`, never a stopped `netpadd`. A field
+added to `robot.health` reaches this report without a change to the format.
 
 ## What the robot does
 
