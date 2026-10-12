@@ -14,7 +14,33 @@ below.
 
 ## Getting it
 
-Run it from a clone of this repo:
+On Linux or macOS, with no Rust toolchain:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+```
+
+It installs what `main` last built to `~/.local/bin`. For another branch's build, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh -s -- udp-pad
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/pollen-robotics/microduck/releases/download/duckctl-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+```
+
+```powershell
+Expand-Archive duckctl.zip -DestinationPath .
+```
+
+Every branch push publishes these builds as the `duckctl-dev-<branch>` prerelease. A macOS binary
+downloaded in a browser rather than with the script is quarantined; clear it with
+`xattr -d com.apple.quarantine duckctl`.
+
+With a Rust toolchain, run it from a clone of this repo:
 
 ```bash
 cargo run -q -p duckctl -- --name <robot-name> info
@@ -26,41 +52,22 @@ Or install it once, at the cost of a snapshot that no longer follows the branch:
 cargo install --path duckctl
 ```
 
-```bash
-duckctl --name <robot-name> info
-```
-
 Without a clone, the same from GitHub — `main`, or add `--branch <name>` for another:
 
 ```bash
 cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
 ```
 
-On Linux either needs the Bluetooth and gamepad headers first:
+On Linux, building needs the Bluetooth and gamepad headers first:
 
 ```bash
 sudo apt install -y libdbus-1-dev libudev-dev pkg-config
 ```
 
-Or take the build CI makes of `main`, with no Rust toolchain. Pick the latest run:
+Then:
 
 ```bash
-export GH_REPO=pollen-robotics/microduck
-```
-
-```bash
-RUN=$(gh run list -w duckctl -b main -s success -L1 --json databaseId -q '.[].databaseId')
-```
-
-then download the archive for your machine — `duckctl-macos-arm64`, `duckctl-macos-x86_64`,
-`duckctl-linux-x86_64`, `duckctl-linux-aarch64` or `duckctl-windows-x86_64`:
-
-```bash
-gh run download "$RUN" -n duckctl-macos-arm64
-```
-
-```bash
-tar -xzf duckctl-macos-arm64.tar.gz && sudo mv duckctl /usr/local/bin/
+duckctl --name <robot-name> info
 ```
 
 Every command below is written in the installed form. Prefix it with
