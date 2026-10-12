@@ -7,17 +7,25 @@ robot, or not Bluetooth at all — a laptop with a pad in its USB port, a phone,
 is the daemon that listens; `padd` is the one that reads a pad over Bluetooth, and exactly one of
 them runs at a time (see [what the robot does](#what-the-robot-does)).
 
-**This is a LAN tool.** There is no authentication, and nothing about the datagrams is meant to cross
-the internet. For a client outside the LAN the path is WebRTC, which is encrypted, carries a return
-path, and works from a data centre — [`../design/remote-webrtc.md`](../design/remote-webrtc.md).
+**It is a quick, unauthenticated LAN tool, made for one case: a pad driving a robot on a network you
+trust, with as little latency as possible.** Anyone on that network who can reach the port can
+drive the robot, stand it up, sit it down and power it off — see [trust](#trust). It is not the
+way to control a robot in general: that is WebRTC, which is authenticated and encrypted, carries a
+return path, and works from outside the LAN —
+[`../design/remote-webrtc.md`](../design/remote-webrtc.md).
 
 Pairing a Bluetooth pad is a different thing, and it is
 [`pair-a-gamepad.md`](pair-a-gamepad.md).
 
 ## Turning it on
 
-It is off, because a robot that has never heard of it should keep driving from the pad it already
-has. Switch it on in the configuration:
+It is off by default. Turn it on only when you know what it opens, on a network you trust.
+
+Once on, **it stays on** — across reboots and updates — until you switch it off again: it is a
+configuration key, not a session. While it is on, the port is open and the Bluetooth pad does not
+work.
+
+Switch it on in the configuration:
 
 ```bash
 sudo robotctl configure
