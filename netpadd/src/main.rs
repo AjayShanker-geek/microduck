@@ -313,12 +313,10 @@ async fn serve(
     }
 }
 
-/// A sender that is not the driving one hears "busy" at most this often: it learns why it is
-/// ignored without the robot answering every datagram of a client it is not listening to.
-const BUSY_ANSWER: Duration = Duration::from_secs(1);
-
 /// The answer to each datagram — `pad_map::wire::Status`, which `udp-pad.md` documents. Nothing
-/// for a malformed one: whatever sent it is not a pad client.
+/// for a malformed one: whatever sent it is not a pad client. A sender that is not the driving
+/// one hears "busy" at most every `BUSY_EVERY`: it learns why it is ignored without the robot
+/// answering every datagram of a client it is not listening to.
 #[derive(Default)]
 struct Answers {
     accepted: u32,
@@ -347,7 +345,7 @@ impl Answers {
             Accept::OtherPeer => {
                 if self
                     .busy_answered
-                    .is_some_and(|at| now.duration_since(at) < BUSY_ANSWER)
+                    .is_some_and(|at| now.duration_since(at) < pad_map::wire::BUSY_EVERY)
                 {
                     return None;
                 }

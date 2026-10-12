@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use pad_map::wire::{Status, Verdict};
+use pad_map::wire::{BUSY_EVERY, Status, Verdict};
 
 /// Sends remembered for matching answers. At 100 Hz this is 2.5 s — far longer than any round trip
 /// worth reporting on a LAN.
@@ -17,6 +17,10 @@ const RING: usize = 256;
 /// No answer for this long, after there were some, is the duck not answering. Twice `netpadd`'s
 /// default `timeout_ms`: by then it has counted this client gone.
 pub const SILENT: Duration = Duration::from_millis(500);
+
+/// The same, for a sender the duck has refused: it is told so only every [`BUSY_EVERY`], so a
+/// silence shorter than a few of those is the refusal standing, not the duck gone.
+pub const BUSY_SILENT: Duration = BUSY_EVERY.saturating_mul(3);
 
 /// Sends going out this long with never an answer: a `netpadd` that predates answers, or nothing
 /// reaching it.
@@ -164,7 +168,12 @@ impl Link {
         match self.last {
             Some((at, verdict)) => {
                 let quiet = now.saturating_duration_since(at);
-                if quiet >= SILENT {
+                let limit = if verdict == Verdict::Busy {
+                    BUSY_SILENT
+                } else {
+                    SILENT
+                };
+                if quiet >= limit {
                     State::Silent(quiet)
                 } else if verdict == Verdict::Busy {
                     State::Busy
@@ -272,7 +281,13 @@ mod tests {
         l.on_status(status(Verdict::Busy, 0, 0), ms(3_001));
         assert_eq!(l.state(ms(3_002)), State::Busy);
         assert_eq!(l.loss(), None, "not driving, so no loss to speak of");
-        assert!(matches!(l.state(ms(3_600)), State::Silent(_)));
+        // Refused, and told so once a second: refused all along, never "gone" in between.
+        assert_eq!(l.state(ms(3_900)), State::Busy);
+        assert_eq!(
+            l.state(ms(3_001) + BUSY_SILENT - Duration::from_millis(1)),
+            State::Busy
+        );
+        assert!(matches!(l.state(ms(3_001) + BUSY_SILENT), State::Silent(_)));
         assert!(State::Silent(SILENT).same_kind(State::Silent(NEVER)));
         l.on_refused(ms(3_700));
         assert_eq!(l.state(ms(3_800)), State::Refused);

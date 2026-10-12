@@ -143,6 +143,10 @@ const _: () = assert!(
     "an answer must never outgrow what it answers"
 );
 
+/// How often a client that does not hold the robot is told so, at most. A sender reads a busy
+/// answer as standing for at least this long, so the receiver and every sender share one value.
+pub const BUSY_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What became of the datagram a [`Status`] answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {

@@ -82,8 +82,8 @@ pub struct View<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Connected,
-    /// Connected, but another client holds the robot.
-    NotDriving,
+    /// The duck answers, and refuses this sender: another client holds it.
+    Refused,
     NotConnected,
     /// Nothing to say yet: no pad, or the first answer not due.
     Pending,
@@ -93,7 +93,7 @@ impl Verdict {
     pub fn word(self) -> &'static str {
         match self {
             Self::Connected => "● CONNECTED",
-            Self::NotDriving => "◐ NOT DRIVING",
+            Self::Refused => "✕ REFUSED",
             Self::NotConnected => "✕ NOT CONNECTED",
             Self::Pending => "… connecting",
         }
@@ -102,7 +102,7 @@ impl Verdict {
     fn color(self) -> Option<Color> {
         match self {
             Self::Connected => Some(Color::Green),
-            Self::NotDriving => Some(Color::Yellow),
+            Self::Refused => Some(Color::Red),
             Self::NotConnected => Some(Color::Red),
             Self::Pending => None,
         }
@@ -115,9 +115,9 @@ pub fn verdict(to: &str, state: State) -> Option<(Verdict, String)> {
         State::Waiting => return None,
         State::Driving => (Verdict::Connected, "driving the duck".to_owned()),
         State::Busy => (
-            Verdict::NotDriving,
-            "another client holds the duck; this one is ignored until it has been quiet for \
-             [netpad] timeout_ms"
+            Verdict::Refused,
+            "another client is driving the duck — only one at a time; this one takes over once \
+             that one has been quiet for [netpad] timeout_ms"
                 .to_owned(),
         ),
         State::Silent(d) => (
@@ -509,7 +509,7 @@ mod tests {
         let to = "duck.local:4210";
         let v = |s| verdict(to, s).unwrap();
         assert_eq!(v(State::Driving).0, Verdict::Connected);
-        assert_eq!(v(State::Busy).0, Verdict::NotDriving);
+        assert_eq!(v(State::Busy).0, Verdict::Refused);
         for s in [
             State::Silent(Duration::from_secs(2)),
             State::NeverAnswered,

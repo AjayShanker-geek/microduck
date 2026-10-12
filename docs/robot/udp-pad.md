@@ -100,14 +100,14 @@ On a terminal it takes the screen, as `robotctl monitor` does, and `q` quits:
 └ q quit ─────────────────────────────────────────────────────────────────────┘
 ```
 
-The duck block is green when connected, yellow when another client holds the robot, and red when
-it is not connected — its first line says which, and why. Held buttons are lit. The figures come
+The duck block is green when connected and red when it is not, or when another client is driving
+— its first line says which, and why. Held buttons are lit. The figures come
 from the robot's [answers](#what-the-robot-answers):
 
 | the duck block says | meaning |
 |---|---|
 | `● CONNECTED` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order |
-| `◐ NOT DRIVING` | another client holds the robot. This laptop is ignored until that one has been quiet for `timeout_ms` |
+| `✕ REFUSED` | another client is driving the robot, and only one may at a time. This laptop is ignored until that one has been quiet for `timeout_ms`, then takes over |
 | `✕ NOT CONNECTED` — nothing listening | the robot's address refuses the port: `netpadd` is not running there, or `[netpad] enabled` is off |
 | `✕ NOT CONNECTED` — stopped answering | there were answers and they stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
 | `✕ NOT CONNECTED` — nothing answers | sends go out and nothing has ever come back: a wrong address, a firewall, or a `netpadd` older than its answers — which still drives |

@@ -486,7 +486,7 @@ mod tests {
         );
         assert!(
             n.link(to, State::Busy)
-                .is_some_and(|m| m.starts_with("◐ NOT DRIVING"))
+                .is_some_and(|m| m.starts_with("✕ REFUSED"))
         );
     }
 
