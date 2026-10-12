@@ -79,6 +79,27 @@ once `robotd`'s deadman runs out, and sits down a second after that.
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
 before sending. gilrs on macOS negates every pad's Y, and some pads already report up as positive.
 
+On a terminal it keeps a status block under its messages, redrawn ten times a second:
+
+```
+pad    Xbox 360 Controller · battery 70% · last input 12 ms ago
+input  L (+0.00, +0.85)  R (+0.00, +0.00)  LT 0.00  RT 0.40  [A] [START]
+send   30 Hz of 30 → 192.168.1.42:4210 · 0 failed
+duck   driving · rtt 3.1 ms · loss 0.0%
+```
+
+`input` is what is sent, before the robot's deadzone. The `duck` line comes from the robot's
+[answers](#what-the-robot-answers):
+
+| `duck` says | meaning |
+|---|---|
+| `driving` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order |
+| `another client is driving it` | someone else holds the robot. This laptop is ignored until that one has been quiet for `timeout_ms` |
+| `no answer for …` | answers stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
+| `never answered` | sends go out and nothing has ever come back: nothing is listening on the port, or `netpadd` is older than its answers. Driving through an older `netpadd` still works |
+
+Piped to a file, it writes the same facts as one line every 10 seconds instead.
+
 ## Writing your own sender
 
 One datagram carries the whole state. Every field is little-endian, and the packet is 28 bytes:
@@ -137,6 +158,33 @@ The rules a sender follows, and why:
   keepalive is what tells the robot you are still there.
 - **Stop sending to let go.** There is no goodbye packet. Silence is the signal, and it is the same
   one a pad that lost its battery gives.
+
+## What the robot answers
+
+`netpadd` answers every datagram from the client that holds the robot, stale ones included, with
+24 bytes sent back to the address the datagram came from. A client that does not hold it is
+answered at most once a second, and a malformed datagram not at all, so an answer is never larger
+than what it answers and never more frequent. A sender is free to ignore the answers: nothing on
+the robot waits for them to be read.
+
+| offset | size | field | |
+|---|---|---|---|
+| 0 | 4 | magic | `b"DKST"` |
+| 4 | 1 | version | `1` |
+| 5 | 1 | verdict | `1` driving: this client holds the robot. `2` busy: another client does |
+| 6 | 4 | seq | u32, the `seq` of the datagram answered |
+| 10 | 4 | accepted | u32, datagrams taken from the client holding the robot |
+| 14 | 4 | stale | u32, datagrams from that client dropped as not newer |
+| 18 | 4 | malformed | u32, datagrams on the port that were not pad state, from anyone |
+| 22 | 2 | reserved | `0` |
+
+The three counts run from `netpadd`'s start and wrap, so read their change, not their value. The
+time from sending a `seq` to its answer is the round trip. Datagrams sent over a second, compared
+with how much `accepted` grew over the same second, give the loss. As with the pad datagram, an
+answer longer than 24 bytes is a version-1 answer with fields this reader does not know.
+
+The answer is sent without waiting: when the socket's buffer is full, or the client cannot be
+reached, it is dropped, and the receive loop never slows for it.
 
 ## What the robot does
 

@@ -1174,6 +1174,7 @@ version = "0.16.1"
 dependencies = [
  "btleplug",
  "clap",
+ "crossterm",
  "duck-ble",
  "duck-ipc-proto",
  "futures",
