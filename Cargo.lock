@@ -1177,7 +1177,10 @@ dependencies = [
  "duck-ble",
  "duck-ipc-proto",
  "futures",
+ "gilrs",
  "libdbus-sys",
+ "pad-map",
+ "ratatui",
  "serde_json",
  "tokio",
  "webbrowser",
@@ -2908,6 +2911,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
+name = "netpadd"
+version = "0.16.3"
+dependencies = [
+ "clap",
+ "duck-ipc-proto",
+ "pad-map",
+ "robotd-params",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nfc"
 version = "0.16.3"
 dependencies = [
@@ -3240,6 +3258,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pad-map"
+version = "0.16.3"
+dependencies = [
+ "duck-ipc-proto",
+ "pad-imu",
+ "robotd-params",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "padd"
 version = "0.16.3"
 dependencies = [
@@ -3249,6 +3280,7 @@ dependencies = [
  "gilrs",
  "libc",
  "pad-imu",
+ "pad-map",
  "robotd-params",
  "serde",
  "serde_json",
