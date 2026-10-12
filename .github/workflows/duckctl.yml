@@ -1,0 +1,72 @@
+# `duckctl` for the machines people drive a duck from — so `duckctl udp-pad` and the BLE commands
+# do not need a Rust toolchain on the laptop.
+#
+# Nothing here goes into a release: `duckctl` is never on a robot (see duckctl/Cargo.toml), so the
+# binaries are run artifacts, one per platform, kept for the default retention. A release's assets
+# are what the updater reads, and a laptop tool does not belong among them.
+#
+# Each artifact holds a tarball rather than the bare binary: an artifact is zipped on download and
+# a zip drops the executable bit.
+#
+# Linux is built on ubuntu-latest, so the binary needs that image's glibc or newer.
+name: duckctl
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: duckctl-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-arm64
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+          # Cross-compiled from the arm64 runner: the Xcode SDK carries both architectures.
+          - name: macos-x86_64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: duckctl-${{ matrix.target }}
+
+      # btleplug talks to BlueZ through libdbus, and gilrs reads pads through libudev.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - run: cargo build --release --locked -p duckctl --target ${{ matrix.target }}
+
+      - run: tar -czf duckctl-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release duckctl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duckctl-${{ matrix.name }}
+          path: duckctl-${{ matrix.name }}.tar.gz
+          if-no-files-found: error
