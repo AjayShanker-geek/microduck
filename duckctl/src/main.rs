@@ -496,7 +496,8 @@ fn deliver(command: &Command, address: &str) -> Result<(), Box<dyn std::error::E
                 .into()
             })
         }
-        // `run` only calls this for the four above; every other command's answer is its JSON.
+        Command::UdpPad { hz, invert_y, .. } => udp_pad::run(address, *hz, *invert_y),
+        // `run` only calls this for the five above; every other command's answer is its JSON.
         _ => Err("this command does not resolve an address".into()),
     }
 }
@@ -1134,11 +1135,13 @@ enum Command {
     Pad(Pad),
     /// Drive a duck running `netpadd` from the pad plugged into this machine, over UDP on the LAN.
     ///
-    /// No Bluetooth: give the duck's address (`duckctl ip` prints it). The duck needs
+    /// Give the duck's address, or leave it out and the address is found the way `ip` finds it —
+    /// so `duckctl --name ducky udp-pad` works, and so does `DUCK_ROBOT`. The duck needs
     /// `[netpad] enabled = true` — docs/robot/udp-pad.md.
     UdpPad {
-        /// The duck's address, optionally with `:port` (default 4210).
-        host: String,
+        /// The duck's address, optionally with `:port` (default 4210). Without it, the address
+        /// comes from `--name`, `DUCK_ROBOT` or the first robot found, over Bluetooth.
+        host: Option<String>,
         /// Most datagrams a second.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(10..=100))]
         hz: u32,
@@ -1443,8 +1446,20 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    // Before anything Bluetooth: this command talks UDP to an address it was given.
-    if let Command::UdpPad { host, hz, invert_y } = &cli.command {
+    // Before anything Bluetooth: given an address, this command talks UDP to it and nothing else.
+    if let Command::UdpPad {
+        host: Some(host),
+        hz,
+        invert_y,
+    } = &cli.command
+    {
+        // By hand, because clap's `conflicts_with` does not reach a global flag from a subcommand.
+        if let Some(name) = &cli.name {
+            return Err(format!(
+                "`--name {name}` and the address {host:?} both say which robot — give one or the other"
+            )
+            .into());
+        }
         return udp_pad::run(host, *hz, *invert_y);
     }
     // Read once, here, so everything below asks `target` rather than the environment: which robot
@@ -1464,14 +1479,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // what makes it the safe command to reach for when a robot cannot be reached, and it is also why
     // it can only report what an advertisement carries.
     let list_only = matches!(cli.command, Command::Scan);
-    // `ip`, `open`, `ssh` and `scp` want one field out of an advertisement, so they read it the way
-    // `scan` does — and unlike `scan` they connect after all when no advertisement carried one.
+    // `ip`, `open`, `ssh`, `scp` and an address-less `udp-pad` want one field out of an
+    // advertisement, so they read it the way `scan` does — and unlike `scan` they connect after all
+    // when no advertisement carried one.
     // Cheap read first, call second: without the fallback these commands would fail on exactly the
     // laptops that use them most, because a robot bonded to this Mac often stops advertising the
     // service to it.
     let resolving = matches!(
         cli.command,
-        Command::Ip | Command::Open { .. } | Command::Ssh { .. } | Command::Scp { .. }
+        Command::Ip
+            | Command::Open { .. }
+            | Command::Ssh { .. }
+            | Command::Scp { .. }
+            | Command::UdpPad { host: None, .. }
     );
 
     let manager = Manager::new().await?;
@@ -2226,14 +2246,15 @@ fn request_line(command: &Command) -> Result<(String, Duration), Box<dyn std::er
         // `scan` returns from `run` as soon as the discovery loop ends, so it never reaches a
         // request: there is no method to send, and connecting is the thing it exists not to do.
         Command::Scan => unreachable!("scan returns before anything connects"),
-        Command::UdpPad { .. } => unreachable!("handled before discovery"),
         Command::Status => ("update.status", serde_json::json!({}), REPLY_TIMEOUT),
         // The fallback, reached only when no advertisement carried an address. `net.status` is what
         // the advertisement is made of — `btd` re-reads it every five seconds — so this asks the
         // same question over a connection that costs a bond and a PIN.
-        Command::Ip | Command::Open { .. } | Command::Ssh { .. } | Command::Scp { .. } => {
-            ("net.status", serde_json::json!({}), REPLY_TIMEOUT)
-        }
+        Command::Ip
+        | Command::Open { .. }
+        | Command::Ssh { .. }
+        | Command::Scp { .. }
+        | Command::UdpPad { .. } => ("net.status", serde_json::json!({}), REPLY_TIMEOUT),
         Command::Version => (
             "hello",
             serde_json::json!({ "api_version": duck_ipc_proto::API_VERSION }),

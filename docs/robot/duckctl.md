@@ -671,11 +671,12 @@ the list of skills.
 ## A pad on this machine, over UDP
 
 ```bash
-duckctl udp-pad $(duckctl ip)
+duckctl udp-pad
 ```
 
 Reads the first gamepad plugged into this machine and sends its state to a duck whose
-`[netpad] enabled` is true, so no Bluetooth is involved. `--hz` (10 to 100, default 30) is the most it
+`[netpad] enabled` is true. The address is found the way `ip` finds it, so `--name` picks the robot;
+give one instead (`duckctl udp-pad 192.168.1.42`) and no Bluetooth is involved at all. `--hz` (10 to 100, default 30) is the most it
 sends a second. It is a LAN tool, and [`udp-pad.md`](udp-pad.md) has the setup and the wire format.
 
 ## Anything else — `call`
