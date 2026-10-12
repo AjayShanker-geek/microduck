@@ -14,7 +14,33 @@ below.
 
 ## Getting it
 
-Run it from a clone of this repo:
+On Linux or macOS, with no Rust toolchain:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+```
+
+It installs what `main` last built to `~/.local/bin`. For another branch's build, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh -s -- udp-pad
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/pollen-robotics/microduck/releases/download/daemon-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+```
+
+```powershell
+Expand-Archive duckctl.zip -DestinationPath .
+```
+
+Every branch push publishes these builds on the `daemon-dev-<branch>` prerelease, beside the daemon. A macOS binary
+downloaded in a browser rather than with the script is quarantined; clear it with
+`xattr -d com.apple.quarantine duckctl`.
+
+With a Rust toolchain, run it from a clone of this repo:
 
 ```bash
 cargo run -q -p duckctl -- --name <robot-name> info
@@ -25,6 +51,20 @@ Or install it once, at the cost of a snapshot that no longer follows the branch:
 ```bash
 cargo install --path duckctl
 ```
+
+Without a clone, the same from GitHub — `main`, or add `--branch <name>` for another:
+
+```bash
+cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
+```
+
+On Linux, building needs the Bluetooth and gamepad headers first:
+
+```bash
+sudo apt install -y libdbus-1-dev libudev-dev pkg-config
+```
+
+Then:
 
 ```bash
 duckctl --name <robot-name> info

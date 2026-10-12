@@ -5555,7 +5555,8 @@ macro_rules! log_startup_identity {
 /// "monotonic" means. Nanoseconds. `monotonic` is `CLOCK_MONOTONIC` — what
 /// [`RobotState::t_ns`] and [`TofFrame::t_ns`] carry; `realtime` is `CLOCK_REALTIME`, the
 /// clock RTCP sender reports are stated in, read together in `media.video` so a peer can
-/// relate the two.
+/// relate the two. Unix only: no daemon runs anywhere else.
+#[cfg(unix)]
 pub mod clock {
     fn read(clock: libc::clockid_t) -> u64 {
         let mut ts = libc::timespec {
