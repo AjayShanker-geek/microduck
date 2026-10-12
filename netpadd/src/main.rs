@@ -264,6 +264,11 @@ async fn serve(
             }
         }
 
+        // Heard, because whoever lost the pad is looking at the robot, not the journal — but only
+        // once the loss has lasted to the sit: a blip on bad Wi-Fi is not worth a quack.
+        if pad_loss.ask(now) {
+            sound(&mut robot, proto::SoundTag::Inquire).await;
+        }
         match pad_loss.tick(now) {
             PadLossAction::Nothing => {}
             PadLossAction::Sit => match sit_if_standing(&mut robot).await {
@@ -297,13 +302,11 @@ async fn serve(
             Step::Idle => {}
             Step::Gone => {
                 tracing::warn!(
-                    "pad client gone — robotd's deadman stops the walking; sitting down in {:?}",
+                    "pad client gone — robotd's deadman stops the walking; sitting down in {:?} if it stays gone",
                     pad_map::loss::PAD_LOST_SIT
                 );
                 mapper.pad_gone();
                 pad_loss.lost(now);
-                // Heard, because whoever lost the pad is looking at the robot, not the journal.
-                sound(&mut robot, proto::SoundTag::Inquire).await;
             }
             Step::Tick(pad) => {
                 mapper.tick(&pad, &config, now, &mut out, &mut frame);
@@ -710,8 +713,8 @@ mod tests {
         assert!(!serving.is_finished());
     }
 
-    /// The client going quiet is a pad going away, as `padd` has it: the robot asks where it went,
-    /// sits a second later, and greets it when it comes back.
+    /// The client going quiet is a pad going away, as `padd` has it: a second later the robot asks
+    /// where it went and sits, and greets it when it comes back.
     #[tokio::test]
     async fn a_client_gone_sits_the_robot_after_a_second() {
         let (_dir, mut seen, serving, client) = start().await;
@@ -722,13 +725,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         let early = drain(&mut seen);
         assert!(
-            early
+            !early
                 .iter()
-                .any(|(m, p)| m == "robot.sound" && p["tag"] == "inquire"),
-            "the robot asks where the pad went: {early:?}"
-        );
-        assert!(
-            !early.iter().any(|(m, _)| m == "robot.do"),
+                .any(|(m, _)| m == "robot.do" || m == "robot.sound"),
             "not yet: {early:?}"
         );
 
@@ -740,6 +739,12 @@ mod tests {
                 .any(|(m, p)| m == "robot.do" && p["skill"] == "sit_toggle"),
             "sits after a second: {later:?}"
         );
+        assert!(
+            later
+                .iter()
+                .any(|(m, p)| m == "robot.sound" && p["tag"] == "inquire"),
+            "and asks where the pad went: {later:?}"
+        );
 
         hold(&client, seq.wrapping_add(1000), pad_map::Buttons::NONE, 100).await;
         let back = drain(&mut seen);
@@ -747,6 +752,27 @@ mod tests {
             back.iter()
                 .any(|(m, p)| m == "robot.sound" && p["tag"] == "greet"),
             "greeted: {back:?}"
+        );
+        assert!(!serving.is_finished());
+    }
+
+    /// A blip — the client gone past `timeout_ms` and back well inside the second — is silent
+    /// both ways: bad Wi-Fi drops out like this many times a minute, and a quack per blip is noise.
+    #[tokio::test]
+    async fn a_client_blip_is_silent() {
+        let (_dir, mut seen, serving, client) = start().await;
+        let seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
+        drain(&mut seen);
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        hold(&client, seq.wrapping_add(1000), pad_map::Buttons::NONE, 100).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let sent = drain(&mut seen);
+        assert!(
+            !sent
+                .iter()
+                .any(|(m, _)| m == "robot.sound" || m == "robot.do"),
+            "{sent:?}"
         );
         assert!(!serving.is_finished());
     }

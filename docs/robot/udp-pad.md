@@ -261,10 +261,11 @@ added to `robot.health` reaches this report without a change to the format.
 - **Silence is the client gone.** After `timeout_ms` with nothing accepted, `netpadd` sends no more
   stick commands, and `robotd`'s deadman (`[safety] deadman_ms`) stops the walking. In-flight holds
   are reset and the lock is released. Then it does what `padd` does when a Bluetooth pad drops
-  out: the robot asks where the pad went (a sound), and a second later sits down if it is standing,
+  out: a second later the robot asks where the pad went (a sound) and sits down if it is standing,
   so it is not left frozen in the middle of a room. A robot that refuses — mid-kick, mid-rise — is
   asked again for a few seconds, then left as it is. While it waits, `robotd` has it look around
-  on its own. The client coming back is greeted with another sound. The journal says so once, at
+  on its own. The client coming back is greeted with another sound — only if the robot had asked:
+  a blip shorter than that second, which bad Wi-Fi produces many times a minute, makes no sound. The journal says so once, at
   `warn`, in each direction: `pad client connected` and `pad client gone`.
 - **The first datagram after a silence, or after `netpadd` starts, fires nothing.** Its buttons
   are taken as already held, so a client that connects with Start down does not stand the robot up or sit it down — not when it

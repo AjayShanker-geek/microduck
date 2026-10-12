@@ -568,8 +568,9 @@ the switch off, the right stick poses the head in that mode. `padd` picks the ch
 second; no restart.
 
 There is no stop button: release the sticks and the robot stands, and `robotd`'s deadman stops it
-if `padd` dies. **If the pad drops out while driving**, the robot asks where it went (a rising
-quack), and after a second sits down if it was standing — kicks and picks are let finish first.
+if `padd` dies. **If the pad drops out while driving**, after a second the robot asks where it
+went (a rising quack) and sits down if it was standing — kicks and picks are let finish first. A
+shorter drop-out is silent.
 When the pad comes back it greets you with a quack; A stands the robot up.
 
 **Left alone, the robot looks around.** After 2 s with the policy running, no motion asked for
