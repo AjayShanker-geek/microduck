@@ -14,7 +14,18 @@ below.
 
 ## Getting it
 
-On Linux or macOS, with no Rust toolchain:
+On any machine with [`uv`](https://docs.astral.sh/uv/) — Linux, macOS or Windows:
+
+```bash
+uvx duckctl --name <robot-name> info
+```
+
+That runs the latest release, downloaded once and cached; nothing is compiled. To have a plain
+`duckctl` on the PATH instead, `uv tool install duckctl` (`uv tool upgrade duckctl` to move it on).
+It is the build of the latest `daemon-v*` release, so it can be behind `main`;
+[`ci-setup.md`](../project/ci-setup.md#duckctl-on-pypi) has how it is published.
+
+For what a branch last built — `main` included — on Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
@@ -58,13 +69,7 @@ Without a clone, the same from GitHub — `main`, or add `--branch <name>` for a
 cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
 ```
 
-On Linux, building needs the Bluetooth and gamepad headers first:
-
-```bash
-sudo apt install -y libdbus-1-dev libudev-dev pkg-config
-```
-
-Then:
+Building needs no system headers: libdbus is compiled in. Then:
 
 ```bash
 duckctl --name <robot-name> info
