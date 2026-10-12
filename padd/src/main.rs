@@ -407,12 +407,15 @@ fn main() -> std::process::ExitCode {
             // stops responding mid-drive, and one line per tick would bury it.
             if driving {
                 tracing::warn!(
-                    "pad gone — robotd's deadman stops the walking; sitting down in {:?}",
+                    "pad gone — robotd's deadman stops the walking; sitting down in {:?} if it stays gone",
                     pad_map::loss::PAD_LOST_SIT
                 );
                 driving = false;
                 pad_loss.lost(tick);
-                // Heard, because whoever lost the pad is looking at the robot, not the journal.
+            }
+            // Heard, because whoever lost the pad is looking at the robot, not the journal — but only
+            // once the loss has lasted to the sit: a blip on bad Wi-Fi is not worth a quack.
+            if pad_loss.ask(tick) {
                 sound(&mut stream, proto::SoundTag::Inquire);
             }
             match pad_loss.tick(tick) {

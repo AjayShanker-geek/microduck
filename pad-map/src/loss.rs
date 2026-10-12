@@ -1,5 +1,9 @@
-//! A pad that was driving and went away: the robot asks where it went, and after a second sits
+//! A pad that was driving and went away: after a second the robot asks where it went and sits
 //! down, so it is not left standing in the middle of a room. The pad coming back is greeted.
+//!
+//! The question waits for the sit rather than sounding the moment the pad drops: a UDP client on
+//! bad Wi-Fi drops out for a fraction of a second at a time, and a quack per blip is noise. A
+//! blip shorter than the sit is silent both ways — no question, so no greeting either.
 //!
 //! Shared by `padd` (the Bluetooth pad dropping out) and `netpadd` (the UDP client going quiet),
 //! so the robot reacts the same way whichever pad it lost. The state machine and the reading of
@@ -32,9 +36,10 @@ pub enum PadLoss {
     /// The pad is here, or never was.
     #[default]
     Present,
-    /// Gone since then; the sit is not due yet, or is being asked for.
-    Lost { since: Instant },
-    /// Gone, and the sit has been dealt with — done, or given up on.
+    /// Gone since then; the sit is not due yet, or is being asked for. `asked` once the robot has
+    /// asked where the pad went.
+    Lost { since: Instant, asked: bool },
+    /// Gone, and the sit has been dealt with — done, or given up on. The robot has asked.
     Settled,
 }
 
@@ -51,19 +56,36 @@ pub enum PadLossAction {
 
 impl PadLoss {
     pub fn lost(&mut self, now: Instant) {
-        *self = Self::Lost { since: now };
+        *self = Self::Lost {
+            since: now,
+            asked: false,
+        };
     }
 
-    /// The pad is back. True when it had been lost, for the greeting.
+    /// True once per loss, when it has lasted [`PAD_LOST_SIT`]: the robot asks where the pad
+    /// went now, out loud. Shorter losses stay silent.
+    pub fn ask(&mut self, now: Instant) -> bool {
+        match self {
+            Self::Lost { since, asked }
+                if !*asked && now.duration_since(*since) >= PAD_LOST_SIT =>
+            {
+                *asked = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The pad is back. True when the robot had asked where it went, for the greeting.
     pub fn found(&mut self) -> bool {
-        let was_lost = *self != Self::Present;
+        let asked = matches!(self, Self::Lost { asked: true, .. } | Self::Settled);
         *self = Self::Present;
-        was_lost
+        asked
     }
 
     pub fn tick(&self, now: Instant) -> PadLossAction {
         match *self {
-            Self::Lost { since } => {
+            Self::Lost { since, .. } => {
                 let gone = now.duration_since(since);
                 if gone >= PAD_LOST_SIT + PAD_LOST_SIT_TRIES {
                     PadLossAction::GiveUp
@@ -152,7 +174,10 @@ mod tests {
 
         loss.lost(t0);
         assert!(loss.pending());
+        assert!(!loss.ask(at(900)), "not asked before the sit");
         assert_eq!(loss.tick(at(900)), PadLossAction::Nothing);
+        assert!(loss.ask(at(1_000)), "asked with the sit");
+        assert!(!loss.ask(at(1_100)), "once");
         assert_eq!(loss.tick(at(1_000)), PadLossAction::Sit);
         assert_eq!(
             loss.tick(at(3_000)),
@@ -166,7 +191,8 @@ mod tests {
         assert_eq!(loss.tick(at(9_000)), PadLossAction::Nothing);
     }
 
-    /// The pad coming back is greeted only when it had been lost, and stops any sit still due.
+    /// The pad coming back is greeted only when the robot had asked where it went, and stops any
+    /// sit still due. A blip shorter than the sit is silent both ways.
     #[test]
     fn a_pad_coming_back_is_greeted_once() {
         let t0 = Instant::now();
@@ -174,7 +200,11 @@ mod tests {
         assert!(!loss.found(), "a pad that was never lost is not a return");
 
         loss.lost(t0);
-        assert!(loss.found(), "back before the sit");
+        assert!(!loss.ask(t0 + Duration::from_millis(500)));
+        assert!(
+            !loss.found(),
+            "a blip: back before the robot asked, no greeting"
+        );
         assert_eq!(
             loss.tick(t0 + Duration::from_secs(2)),
             PadLossAction::Nothing,
@@ -182,6 +212,14 @@ mod tests {
         );
 
         loss.lost(t0);
+        assert!(loss.ask(t0 + Duration::from_secs(1)));
+        assert!(
+            loss.found(),
+            "back after the robot asked, before the sit was done"
+        );
+
+        loss.lost(t0);
+        assert!(loss.ask(t0 + Duration::from_secs(1)));
         loss.settle();
         assert!(loss.found(), "back after the sit");
         assert!(!loss.found(), "once");
