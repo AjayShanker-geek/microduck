@@ -363,7 +363,12 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 .filter(|(b, _)| pad.is_pressed(*b))
                 .fold(Buttons::NONE, |a, (_, bit)| a | *bit);
             let trigger = |b: Button| f64::from(pad.button_data(b).map_or(0.0, |d| d.value()));
-            let y = if invert_y { -1.0 } else { 1.0 };
+            // gilrs on macOS reports up as negative; on Linux, as `padd` reads it, up is positive.
+            let y = if invert_y != cfg!(target_os = "macos") {
+                -1.0
+            } else {
+                1.0
+            };
             let mut packet = Packet::from_axes(
                 0,
                 now.duration_since(started).as_millis() as u32,

@@ -92,7 +92,7 @@ robot times it out as it would a Bluetooth pad that went away. `Ctrl-C` ends it:
 once `robotd`'s deadman runs out, and sits down a second after that.
 
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
-before sending. gilrs on macOS negates every pad's Y, and some pads already report up as positive.
+before sending.
 
 On a terminal it takes the screen, as `robotctl monitor` does, and `q` quits:
 
