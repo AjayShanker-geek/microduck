@@ -21,7 +21,7 @@ pub mod edit;
 pub mod registry;
 
 pub mod pad_axes;
-pub use pad_axes::{PadAxesParams, PadBodyParams, PadHeadParams};
+pub use pad_axes::{PadAxesParams, PadBodyParams, PadHeadParams, PadRollerParams};
 
 use std::path::{Path, PathBuf};
 
@@ -98,48 +98,17 @@ pub struct Params {
     pub pad_imu_head_control: PadImuHeadControlParams,
     /// How fast full stick deflection drives the robot. `padd` reads this as well.
     pub pad_drive: PadDriveParams,
+    /// Which stick drives which command, per D-pad mode. `padd` and `netpadd` read this, and
+    /// the three sections after it, through `pad-map`.
     pub pad_axes: PadAxesParams,
+    /// Full-deflection head travel per joint.
     pub pad_head: PadHeadParams,
+    /// Body + head mode's height and tilt ranges.
     pub pad_body: PadBodyParams,
+    /// `[pad_drive]` on wheels.
     pub pad_roller: PadRollerParams,
     /// The pad over UDP: `netpadd` reads this, and so does `padd`, to know whether to stand down.
     pub netpad: NetpadParams,
-}
-
-/// Roller commands keep their own bounds and disable strafe by default.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct PadRollerParams {
-    pub vx_min: f64,
-    pub vx_max: f64,
-    pub vy_min: f64,
-    pub vy_max: f64,
-    pub vyaw_min: f64,
-    pub vyaw_max: f64,
-}
-impl Default for PadRollerParams {
-    fn default() -> Self {
-        Self {
-            vx_min: -0.5,
-            vx_max: 0.6,
-            vy_min: 0.0,
-            vy_max: 0.0,
-            vyaw_min: -0.3,
-            vyaw_max: 0.3,
-        }
-    }
-}
-impl PadRollerParams {
-    pub fn limits(&self) -> PadDriveParams {
-        PadDriveParams {
-            vx_min: self.vx_min,
-            vx_max: self.vx_max,
-            vy_min: self.vy_min,
-            vy_max: self.vy_max,
-            vyaw_min: self.vyaw_min,
-            vyaw_max: self.vyaw_max,
-        }
-    }
 }
 
 /// The pad's walking speed limits: what full stick deflection asks for, per axis and per
@@ -148,7 +117,7 @@ impl PadRollerParams {
 /// Each axis has a bound per direction, signed in the robot's own frame — `vx` forward, `vy` to
 /// the left, `vyaw` counter-clockwise seen from above — so a `_min` is the bound in the negative
 /// direction and is itself negative (or zero, to forbid that direction). The stick is linear
-/// between centre and either bound. Walk mode only: roller mode keeps its own shaping.
+/// between centre and either bound. Walk mode only: on wheels it is `[pad_roller]`.
 ///
 /// This is what the *pad* asks for, not a limit on the robot. A `robot.move` from anywhere else
 /// is not bounded by it, and the policy only follows commands inside the range it was trained
@@ -2500,6 +2469,28 @@ impl Params {
     }
 }
 
+/// Drops every key under `prefix` the registry does not know, recursing into tables that hold
+/// registry keys — `[pad_axes.drive.vyaw]` is three levels down — and naming each one dropped.
+fn prune_fields(prefix: &str, fields: &mut toml::Table, ignored: &mut Vec<String>) {
+    fields.retain(|key, value| {
+        let path = format!("{prefix}.{key}");
+        if registry::entry_for(&path).is_some() {
+            return true;
+        }
+        if registry::REGISTRY
+            .iter()
+            .any(|entry| entry.key.starts_with(&format!("{path}.")))
+        {
+            if let Some(children) = value.as_table_mut() {
+                prune_fields(&path, children, ignored);
+            }
+            return true;
+        }
+        ignored.push(path);
+        false
+    });
+}
+
 /// Re-parse a file that `deny_unknown_fields` rejected, dropping the keys this build has no
 /// place for, and say which they were. `None` when nothing was dropped — the parse failed for
 /// some other reason and the caller should report that instead.
@@ -2528,26 +2519,6 @@ impl Params {
 /// the backstop here: if the registry ever did drift, the pruned table would still be rejected
 /// rather than quietly deserialised into something else.
 #[allow(clippy::type_complexity)]
-fn prune_fields(prefix: &str, fields: &mut toml::Table, ignored: &mut Vec<String>) {
-    fields.retain(|key, value| {
-        let path = format!("{prefix}.{key}");
-        if registry::entry_for(&path).is_some() {
-            return true;
-        }
-        if registry::REGISTRY
-            .iter()
-            .any(|entry| entry.key.starts_with(&format!("{path}.")))
-        {
-            if let Some(children) = value.as_table_mut() {
-                prune_fields(&path, children, ignored);
-            }
-            return true;
-        }
-        ignored.push(path);
-        false
-    });
-}
-
 fn without_unknown_keys(text: &str) -> Option<(Result<Params, toml::de::Error>, Vec<String>)> {
     let mut table: toml::Table = text.parse().ok()?;
     let mut ignored: Vec<String> = Vec::new();
@@ -2633,6 +2604,24 @@ mod tests {
     /// The registry is the right thing to check against rather than `PolicyParams`'s fields,
     /// because it is itself pinned complete against serde's own field list.
     #[test]
+    fn every_slot_is_a_registry_key() {
+        for slot in super::Slot::ALL {
+            let key = slot.config_key();
+            let entry = crate::registry::REGISTRY
+                .iter()
+                .find(|e| e.key == key)
+                .unwrap_or_else(|| panic!("{key} is not a key of robotd.toml"));
+            assert_eq!(
+                entry.kind,
+                crate::registry::Kind::OptionalPath,
+                "{key} must be a path slot"
+            );
+        }
+    }
+
+    /// A partial binding keeps the rest of its mode's default, an unknown nested key is dropped
+    /// rather than taking the bindings with it, and every out-of-range value is refused.
+    #[test]
     fn controller_partial_overrides_and_invalid_values() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("robotd.toml");
@@ -2666,22 +2655,6 @@ mod tests {
         ] {
             std::fs::write(&path, text).unwrap();
             assert!(Params::load(&path, true).is_err(), "accepted {text}");
-        }
-    }
-
-    #[test]
-    fn every_slot_is_a_registry_key() {
-        for slot in super::Slot::ALL {
-            let key = slot.config_key();
-            let entry = crate::registry::REGISTRY
-                .iter()
-                .find(|e| e.key == key)
-                .unwrap_or_else(|| panic!("{key} is not a key of robotd.toml"));
-            assert_eq!(
-                entry.kind,
-                crate::registry::Kind::OptionalPath,
-                "{key} must be a path slot"
-            );
         }
     }
 

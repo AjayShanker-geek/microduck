@@ -553,7 +553,7 @@ mode = "walk"
 # vyaw_min = -1.0
 
 # ── Pad joystick axes ──────────────────────────────────────────────────────────────────────
-# Same file as [pad] button bindings; all controller settings reload within a second.
+# Read by `padd` and `netpadd`, like [pad]; all of it reloads within a second.
 # Only overrides need to be written. Modes: drive, head, head_drive, body_pose.
 # Every command binding has source (left_x/left_y/right_x/right_y/none), invert and gain.
 # Missing fields keep the binding's defaults, including direction. Gain is applied before

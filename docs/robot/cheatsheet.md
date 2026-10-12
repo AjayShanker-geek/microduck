@@ -144,7 +144,7 @@ Three properties worth trusting:
 Saving offers what the change actually needs, from the daemon that actually reads it: a restart
 for most keys (`[media]` and `[duck_detector]` are `mediad`'s, `[head_imu]` is `tofd`'s on a zero3 and `robotd`'s on a beta), a `robotd`
 *reload* for `[policy]` — the motors stay powered — and nothing at all for `[pad]`,
-`[pad_imu_head_control]` and `[pad_drive]`, which `padd` picks up within a second. `sudo`, because the file
+`[pad_imu_head_control]` and the other `pad_` sections, which the pad daemon picks up within a second. `sudo`, because the file
 is root-owned — without it the editor opens read-only and says so on the first write.
 `--file` points it elsewhere for a bench copy. The shipped `deploy/robotd.toml` stays the
 reference for *why* each knob exists; this is for flipping them.
@@ -503,7 +503,8 @@ same section move the two edges; the design is [`robotd-design.md` §2.4.2](../d
 Run `sudo robotctl configure`, then search for `pad_axes` to select axes, directions and gains.
 Head, body and roller limits are under `pad_head`, `pad_body` and `pad_roller`; walking speed
 limits remain under `pad_drive`. These share `/etc/robot/robotd.toml` with the `[pad]` button
-bindings, and apply within a second without restarting.
+bindings, and apply within a second without restarting — to the Bluetooth pad and the pad over
+UDP alike.
 
 For example, forward/back on the right stick and steering on the left, with gentler steering:
 

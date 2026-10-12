@@ -920,12 +920,14 @@ A TOML file read at startup and, for the most part, **not watched**. It lives ou
 `/etc/robot/robotd.toml`.
 
 Two parts of it are watched, and both are exceptions earned by what a restart would cost rather
-than steps towards watching the whole file. `padd` stats the file once a second and re-reads
-the controller sections (`[pad]`, `[pad_axes]`, `[pad_drive]`, `[pad_head]`, `[pad_body]`,
-`[pad_roller]` and `[pad_imu_head_control]`) when the mtime moves: a binding is changed from a phone, and restarting
-`padd` to apply it would drop the pad session and let `robotd`'s deadman zero a walking robot.
-Controller settings are replaced together after validation; a failed live read keeps the last
-valid configuration. At startup, a missing or invalid file uses the built-in defaults.
+than steps towards watching the whole file. Whichever pad daemon runs — `padd`, or `netpadd`
+for the pad over UDP — stats the file once a second and re-reads the controller sections
+(`[pad]`, `[pad_imu_head_control]`, `[pad_drive]`, `[pad_axes]`, `[pad_head]`, `[pad_body]` and
+`[pad_roller]`) when the mtime moves: a binding is changed from a phone, and restarting the
+daemon to apply it would drop the pad session and let `robotd`'s deadman zero a walking robot.
+Both read them through `pad-map`'s `Config::reload`, so the two cannot map a pad differently.
+The sections are replaced together after validation; a failed live read keeps the mapping in
+use. At startup, a missing or invalid file uses the built-in defaults.
 
 `[pad_axes]` selects logical gilrs axes (`left_x`, `left_y`, `right_x`, `right_y`, `none`) for
 robot commands, separately for `drive`, `head`, `head_drive` and `body_pose`. Each binding has
@@ -940,8 +942,8 @@ can reach the requested pose.
 
 D-pad mode selection and Start/Select holds remain fixed. With IMU head control active,
 `head_drive` uses the `drive` stick bindings while tilt drives the head through `[pad_head]` limits.
-Smoothing remains in `robotd`'s `[control]` settings. `padd --deadzone` and `--max-head` remain
-explicit overrides of the corresponding file settings for bench use.
+Smoothing remains in `robotd`'s `[control]` settings. `--deadzone` and `--max-head`, on either
+daemon, override the corresponding file settings for bench use.
 
 `robotd` re-reads `[policy]` — all of it but `mode` and `enabled` — when asked to, which is how
 `robotctl policy add` lands a skill without taking motor control away from a standing robot.

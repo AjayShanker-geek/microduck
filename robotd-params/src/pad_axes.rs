@@ -1,6 +1,15 @@
-//! Pad axes in robot coordinates. Defaults preserve the shipped controller mapping.
+//! `[pad_axes]`, `[pad_head]`, `[pad_body]` and `[pad_roller]`: which stick drives which command,
+//! and how far full deflection asks it to go. `pad-map` evaluates them for `padd` and `netpadd`.
+//!
+//! The defaults are the shipped mapping, signs included. A stick's sign is gilrs's: up and right
+//! read positive on every pad it normalises. The robot's frame has `vy` positive to the left and
+//! `vyaw` counter-clockwise, which is why strafe and turn are inverted.
+
 use serde::{Deserialize, Serialize};
 
+use crate::PadDriveParams;
+
+/// A logical stick axis, as gilrs normalises it, or nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AxisSource {
@@ -11,20 +20,19 @@ pub enum AxisSource {
     RightX,
     RightY,
 }
+
+/// [`AxisSource`]'s spellings, for the editor's choice list.
 pub const AXIS_SOURCES: &[&str] = &["none", "left_x", "left_y", "right_x", "right_y"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
+/// One command's stick: which axis, which way round, and how sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct AxisBinding {
     pub source: AxisSource,
     pub invert: bool,
+    /// Applied before the clamp to full deflection, so above 1 it reaches the limit early.
     pub gain: f64,
 }
-impl Default for AxisBinding {
-    fn default() -> Self {
-        Self::new(AxisSource::None, false)
-    }
-}
+
 impl AxisBinding {
     const fn new(source: AxisSource, invert: bool) -> Self {
         Self {
@@ -33,14 +41,17 @@ impl AxisBinding {
             gain: 1.0,
         }
     }
-    /// Normalize the selected stick before scaling to a command's physical limits.
-    pub fn evaluate(&self, sticks: [f64; 4], deadzone: f64) -> f64 {
+
+    /// The command's share of its limit, in `[-1, 1]`: deadzone, then inversion, gain and the
+    /// clamp. The deadzone zeroes small deflections without rescaling what is left, as the
+    /// prototype did.
+    pub fn evaluate(&self, sticks: Sticks, deadzone: f64) -> f64 {
         let value = match self.source {
-            AxisSource::None => 0.0,
-            AxisSource::LeftX => sticks[0],
-            AxisSource::LeftY => sticks[1],
-            AxisSource::RightX => sticks[2],
-            AxisSource::RightY => sticks[3],
+            AxisSource::None => return 0.0,
+            AxisSource::LeftX => sticks.left_x,
+            AxisSource::LeftY => sticks.left_y,
+            AxisSource::RightX => sticks.right_x,
+            AxisSource::RightY => sticks.right_y,
         };
         if !value.is_finite() || value.abs() < deadzone {
             return 0.0;
@@ -50,8 +61,18 @@ impl AxisBinding {
     }
 }
 
-// A gain-only edit must keep that mode's source and sign. Deserializing each binding
-// independently with AxisBinding::default() would silently disable it instead.
+/// The four stick axes of one frame, raw.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sticks {
+    pub left_x: f64,
+    pub left_y: f64,
+    pub right_x: f64,
+    pub right_y: f64,
+}
+
+/// A binding as the file writes it: every field optional, so a gain-only edit keeps that mode's
+/// source and sign. Deserialising [`AxisBinding`] directly would default the rest and silently
+/// switch the binding off.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct BindingOverride {
@@ -59,6 +80,7 @@ struct BindingOverride {
     invert: Option<bool>,
     gain: Option<f64>,
 }
+
 impl BindingOverride {
     fn apply(self, binding: &mut AxisBinding) {
         if let Some(source) = self.source {
@@ -73,97 +95,125 @@ impl BindingOverride {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct DriveAxes {
-    pub vx: AxisBinding,
-    pub vy: AxisBinding,
-    pub vyaw: AxisBinding,
-}
-impl Default for DriveAxes {
-    fn default() -> Self {
-        Self {
-            vx: AxisBinding::new(AxisSource::LeftY, false),
-            vy: AxisBinding::new(AxisSource::LeftX, true),
-            vyaw: AxisBinding::new(AxisSource::RightX, true),
+/// One mode's bindings: the struct, its shipped defaults, a deserialiser that lays the file's
+/// overrides on top of them, and the list of its registry keys.
+macro_rules! mode_axes {
+    (
+        $(#[$doc:meta])*
+        $name:ident, $mode:literal {
+            $( $field:ident: $source:ident $(, $invert:ident)? ; )*
         }
+    ) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, PartialEq, Serialize)]
+        pub struct $name {
+            $( pub $field: AxisBinding, )*
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    $( $field: AxisBinding::new(AxisSource::$source, mode_axes!(@invert $($invert)?)), )*
+                }
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                #[derive(Default, Deserialize)]
+                #[serde(deny_unknown_fields, default)]
+                struct Overrides {
+                    $( $field: Option<BindingOverride>, )*
+                }
+                let overrides = Overrides::deserialize(deserializer)?;
+                let mut axes = Self::default();
+                $(
+                    if let Some(o) = overrides.$field {
+                        o.apply(&mut axes.$field);
+                    }
+                )*
+                Ok(axes)
+            }
+        }
+
+        impl $name {
+            fn bindings(&self) -> impl Iterator<Item = (&'static str, &AxisBinding)> {
+                [ $( (concat!("pad_axes.", $mode, ".", stringify!($field)), &self.$field), )* ]
+                    .into_iter()
+            }
+        }
+    };
+    (@invert inverted) => { true };
+    (@invert) => { false };
+}
+
+mode_axes! {
+    /// D-pad left: the left stick walks and strafes, the right stick turns. Also the sticks of
+    /// head + move while the pad's IMU has the head.
+    DriveAxes, "drive" {
+        vx: LeftY;
+        vy: LeftX, inverted;
+        vyaw: RightX, inverted;
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct HeadAxes {
-    pub neck_pitch: AxisBinding,
-    pub head_pitch: AxisBinding,
-    pub head_yaw: AxisBinding,
-    pub head_roll: AxisBinding,
-}
-impl Default for HeadAxes {
-    fn default() -> Self {
-        Self {
-            neck_pitch: AxisBinding::new(AxisSource::RightY, false),
-            head_pitch: AxisBinding::new(AxisSource::LeftY, true),
-            head_yaw: AxisBinding::new(AxisSource::LeftX, true),
-            head_roll: AxisBinding::new(AxisSource::RightX, false),
-        }
+mode_axes! {
+    /// D-pad up: all four axes pose the head, and the body holds still. The prototype's alpha
+    /// mapping, signs included — its head_pitch and head_yaw joint axes run opposite to the
+    /// stick, verified on hardware there and kept verbatim.
+    HeadAxes, "head" {
+        neck_pitch: RightY;
+        head_pitch: LeftY, inverted;
+        head_yaw: LeftX, inverted;
+        head_roll: RightX;
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct HeadDriveAxes {
-    pub vx: AxisBinding,
-    pub vy: AxisBinding,
-    pub vyaw: AxisBinding,
-    pub neck_pitch: AxisBinding,
-    pub head_pitch: AxisBinding,
-    pub head_yaw: AxisBinding,
-    pub head_roll: AxisBinding,
-}
-impl Default for HeadDriveAxes {
-    fn default() -> Self {
-        Self {
-            vx: AxisBinding::new(AxisSource::LeftY, false),
-            vy: AxisBinding::new(AxisSource::None, false),
-            vyaw: AxisBinding::new(AxisSource::LeftX, true),
-            neck_pitch: AxisBinding::new(AxisSource::None, false),
-            head_pitch: AxisBinding::new(AxisSource::RightY, true),
-            head_yaw: AxisBinding::new(AxisSource::RightX, true),
-            head_roll: AxisBinding::new(AxisSource::None, false),
-        }
+mode_axes! {
+    /// D-pad right, when the right stick has the head: the left stick walks and turns — no
+    /// strafe, the right stick is busy — and the right stick looks around with the signs head
+    /// mode gives its left stick.
+    HeadDriveAxes, "head_drive" {
+        vx: LeftY;
+        vy: None;
+        vyaw: LeftX, inverted;
+        neck_pitch: None;
+        head_pitch: RightY, inverted;
+        head_yaw: RightX, inverted;
+        head_roll: None;
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct BodyPoseAxes {
-    pub z: AxisBinding,
-    pub pitch: AxisBinding,
-    pub roll: AxisBinding,
-    pub neck_pitch: AxisBinding,
-    pub head_pitch: AxisBinding,
-    pub head_yaw: AxisBinding,
-    pub head_roll: AxisBinding,
-}
-impl Default for BodyPoseAxes {
-    fn default() -> Self {
-        Self {
-            z: AxisBinding::new(AxisSource::LeftY, false),
-            pitch: AxisBinding::new(AxisSource::None, false),
-            roll: AxisBinding::new(AxisSource::LeftX, false),
-            neck_pitch: AxisBinding::new(AxisSource::None, false),
-            head_pitch: AxisBinding::new(AxisSource::RightY, true),
-            head_yaw: AxisBinding::new(AxisSource::RightX, true),
-            head_roll: AxisBinding::new(AxisSource::None, false),
-        }
+mode_axes! {
+    /// D-pad down: the left stick crouches and leans the standing robot sideways, and the right
+    /// stick looks around as in head + move, so it means one thing wherever it poses the head.
+    /// No forward/back tilt: the right stick has the head. The lean keeps the old body mode's
+    /// sign, moved from the right stick to the left.
+    BodyPoseAxes, "body_pose" {
+        z: LeftY;
+        pitch: None;
+        roll: LeftX;
+        neck_pitch: None;
+        head_pitch: RightY, inverted;
+        head_yaw: RightX, inverted;
+        head_roll: None;
     }
 }
 
+/// `[pad_axes]`: the deadzone and every mode's bindings. Only overrides are written; a field left
+/// out keeps the mode's shipped binding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PadAxesParams {
+    /// Deflection below this counts as centre. Analogue sticks rarely rest at exactly zero, and
+    /// without it the robot creeps. The prototype's value.
     pub deadzone: f64,
     pub drive: DriveAxes,
     pub head: HeadAxes,
     pub head_drive: HeadDriveAxes,
     pub body_pose: BodyPoseAxes,
 }
+
 impl Default for PadAxesParams {
     fn default() -> Self {
         Self {
@@ -175,40 +225,21 @@ impl Default for PadAxesParams {
         }
     }
 }
+
 impl PadAxesParams {
-    pub fn bindings(&self) -> Vec<(&'static str, &AxisBinding)> {
-        vec![
-            ("pad_axes.drive.vx", &self.drive.vx),
-            ("pad_axes.drive.vy", &self.drive.vy),
-            ("pad_axes.drive.vyaw", &self.drive.vyaw),
-            ("pad_axes.head.neck_pitch", &self.head.neck_pitch),
-            ("pad_axes.head.head_pitch", &self.head.head_pitch),
-            ("pad_axes.head.head_yaw", &self.head.head_yaw),
-            ("pad_axes.head.head_roll", &self.head.head_roll),
-            ("pad_axes.head_drive.vx", &self.head_drive.vx),
-            ("pad_axes.head_drive.vy", &self.head_drive.vy),
-            ("pad_axes.head_drive.vyaw", &self.head_drive.vyaw),
-            (
-                "pad_axes.head_drive.neck_pitch",
-                &self.head_drive.neck_pitch,
-            ),
-            (
-                "pad_axes.head_drive.head_pitch",
-                &self.head_drive.head_pitch,
-            ),
-            ("pad_axes.head_drive.head_yaw", &self.head_drive.head_yaw),
-            ("pad_axes.head_drive.head_roll", &self.head_drive.head_roll),
-            ("pad_axes.body_pose.z", &self.body_pose.z),
-            ("pad_axes.body_pose.pitch", &self.body_pose.pitch),
-            ("pad_axes.body_pose.roll", &self.body_pose.roll),
-            ("pad_axes.body_pose.neck_pitch", &self.body_pose.neck_pitch),
-            ("pad_axes.body_pose.head_pitch", &self.body_pose.head_pitch),
-            ("pad_axes.body_pose.head_yaw", &self.body_pose.head_yaw),
-            ("pad_axes.body_pose.head_roll", &self.body_pose.head_roll),
-        ]
+    /// Every binding with its registry key prefix, for validation.
+    pub fn bindings(&self) -> impl Iterator<Item = (&'static str, &AxisBinding)> {
+        self.drive
+            .bindings()
+            .chain(self.head.bindings())
+            .chain(self.head_drive.bindings())
+            .chain(self.body_pose.bindings())
     }
 }
 
+/// `[pad_head]`: full-deflection head travel per joint, radians. The head command feeds the
+/// policy's observation rather than a servo directly, so this is the prototype's generous 2.5 —
+/// the network itself decides how far the head actually goes. Also the clamp on the pad-IMU head.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PadHeadParams {
@@ -217,17 +248,28 @@ pub struct PadHeadParams {
     pub head_yaw_max: f64,
     pub head_roll_max: f64,
 }
+
 impl Default for PadHeadParams {
     fn default() -> Self {
+        Self::all(2.5)
+    }
+}
+
+impl PadHeadParams {
+    /// One limit for every joint — `--max-head`.
+    pub fn all(max: f64) -> Self {
         Self {
-            neck_pitch_max: 2.5,
-            head_pitch_max: 2.5,
-            head_yaw_max: 2.5,
-            head_roll_max: 2.5,
+            neck_pitch_max: max,
+            head_pitch_max: max,
+            head_yaw_max: max,
+            head_roll_max: max,
         }
     }
 }
 
+/// `[pad_body]`: body-pose stick ranges, from the training env via the prototype. Height in
+/// metres is asymmetric — little headroom up at the standing height, more crouch down — and the
+/// tilts are radians, capped at ~15°.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PadBodyParams {
@@ -236,6 +278,7 @@ pub struct PadBodyParams {
     pub pitch_max: f64,
     pub roll_max: f64,
 }
+
 impl Default for PadBodyParams {
     fn default() -> Self {
         Self {
@@ -247,151 +290,81 @@ impl Default for PadBodyParams {
     }
 }
 
-impl<'de> Deserialize<'de> for DriveAxes {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(deny_unknown_fields, default)]
-        struct Overrides {
-            vx: Option<BindingOverride>,
-            vy: Option<BindingOverride>,
-            vyaw: Option<BindingOverride>,
+/// `[pad_roller]`: `[pad_drive]`'s counterpart on wheels. The prototype's roller shaping: push
+/// harder than you can brake, no strafe, and heading capped at 0.3 rad/s regardless of the walking
+/// limits — the roller launch line's `--max-angular-vel 0.3`, unchanged across both of its eras.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PadRollerParams {
+    pub vx_min: f64,
+    pub vx_max: f64,
+    pub vy_min: f64,
+    pub vy_max: f64,
+    pub vyaw_min: f64,
+    pub vyaw_max: f64,
+}
+
+impl Default for PadRollerParams {
+    fn default() -> Self {
+        Self {
+            vx_min: -0.5,
+            vx_max: 0.6,
+            vy_min: 0.0,
+            vy_max: 0.0,
+            vyaw_min: -0.3,
+            vyaw_max: 0.3,
         }
-        let overrides = Overrides::deserialize(deserializer)?;
-        let mut result = Self::default();
-        if let Some(binding) = overrides.vx {
-            binding.apply(&mut result.vx);
-        }
-        if let Some(binding) = overrides.vy {
-            binding.apply(&mut result.vy);
-        }
-        if let Some(binding) = overrides.vyaw {
-            binding.apply(&mut result.vyaw);
-        }
-        Ok(result)
     }
 }
 
-impl<'de> Deserialize<'de> for HeadAxes {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(deny_unknown_fields, default)]
-        struct Overrides {
-            neck_pitch: Option<BindingOverride>,
-            head_pitch: Option<BindingOverride>,
-            head_yaw: Option<BindingOverride>,
-            head_roll: Option<BindingOverride>,
+impl PadRollerParams {
+    /// The same bounds as walking ones, so both are scaled by one function.
+    pub fn limits(&self) -> PadDriveParams {
+        PadDriveParams {
+            vx_min: self.vx_min,
+            vx_max: self.vx_max,
+            vy_min: self.vy_min,
+            vy_max: self.vy_max,
+            vyaw_min: self.vyaw_min,
+            vyaw_max: self.vyaw_max,
         }
-        let overrides = Overrides::deserialize(deserializer)?;
-        let mut result = Self::default();
-        if let Some(binding) = overrides.neck_pitch {
-            binding.apply(&mut result.neck_pitch);
-        }
-        if let Some(binding) = overrides.head_pitch {
-            binding.apply(&mut result.head_pitch);
-        }
-        if let Some(binding) = overrides.head_yaw {
-            binding.apply(&mut result.head_yaw);
-        }
-        if let Some(binding) = overrides.head_roll {
-            binding.apply(&mut result.head_roll);
-        }
-        Ok(result)
-    }
-}
-
-impl<'de> Deserialize<'de> for HeadDriveAxes {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(deny_unknown_fields, default)]
-        struct Overrides {
-            vx: Option<BindingOverride>,
-            vy: Option<BindingOverride>,
-            vyaw: Option<BindingOverride>,
-            neck_pitch: Option<BindingOverride>,
-            head_pitch: Option<BindingOverride>,
-            head_yaw: Option<BindingOverride>,
-            head_roll: Option<BindingOverride>,
-        }
-        let overrides = Overrides::deserialize(deserializer)?;
-        let mut result = Self::default();
-        if let Some(binding) = overrides.vx {
-            binding.apply(&mut result.vx);
-        }
-        if let Some(binding) = overrides.vy {
-            binding.apply(&mut result.vy);
-        }
-        if let Some(binding) = overrides.vyaw {
-            binding.apply(&mut result.vyaw);
-        }
-        if let Some(binding) = overrides.neck_pitch {
-            binding.apply(&mut result.neck_pitch);
-        }
-        if let Some(binding) = overrides.head_pitch {
-            binding.apply(&mut result.head_pitch);
-        }
-        if let Some(binding) = overrides.head_yaw {
-            binding.apply(&mut result.head_yaw);
-        }
-        if let Some(binding) = overrides.head_roll {
-            binding.apply(&mut result.head_roll);
-        }
-        Ok(result)
-    }
-}
-
-impl<'de> Deserialize<'de> for BodyPoseAxes {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Default, Deserialize)]
-        #[serde(deny_unknown_fields, default)]
-        struct Overrides {
-            z: Option<BindingOverride>,
-            pitch: Option<BindingOverride>,
-            roll: Option<BindingOverride>,
-            neck_pitch: Option<BindingOverride>,
-            head_pitch: Option<BindingOverride>,
-            head_yaw: Option<BindingOverride>,
-            head_roll: Option<BindingOverride>,
-        }
-        let overrides = Overrides::deserialize(deserializer)?;
-        let mut result = Self::default();
-        if let Some(binding) = overrides.z {
-            binding.apply(&mut result.z);
-        }
-        if let Some(binding) = overrides.pitch {
-            binding.apply(&mut result.pitch);
-        }
-        if let Some(binding) = overrides.roll {
-            binding.apply(&mut result.roll);
-        }
-        if let Some(binding) = overrides.neck_pitch {
-            binding.apply(&mut result.neck_pitch);
-        }
-        if let Some(binding) = overrides.head_pitch {
-            binding.apply(&mut result.head_pitch);
-        }
-        if let Some(binding) = overrides.head_yaw {
-            binding.apply(&mut result.head_yaw);
-        }
-        if let Some(binding) = overrides.head_roll {
-            binding.apply(&mut result.head_roll);
-        }
-        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn deadzone_is_not_rescaled_and_gain_is_clamped() {
+        let x = |left_x| Sticks {
+            left_x,
+            ..Default::default()
+        };
         let mut axis = AxisBinding::new(AxisSource::LeftX, false);
-        assert_eq!(axis.evaluate([0.09, 0.0, 0.0, 0.0], 0.1), 0.0);
-        assert_eq!(axis.evaluate([0.1, 0.0, 0.0, 0.0], 0.1), 0.1);
-        assert_eq!(axis.evaluate([f64::NAN, 0.0, 0.0, 0.0], 0.1), 0.0);
+        assert_eq!(axis.evaluate(x(0.09), 0.1), 0.0);
+        assert_eq!(axis.evaluate(x(0.1), 0.1), 0.1);
+        assert_eq!(axis.evaluate(x(f64::NAN), 0.1), 0.0);
         axis.gain = 3.0;
         axis.invert = true;
-        assert_eq!(axis.evaluate([0.5, 0.0, 0.0, 0.0], 0.1), -1.0);
+        assert_eq!(axis.evaluate(x(0.5), 0.1), -1.0);
         axis.source = AxisSource::None;
-        assert_eq!(axis.evaluate([1.0; 4], 0.1), 0.0);
+        assert_eq!(axis.evaluate(x(1.0), 0.1), 0.0);
+    }
+
+    /// Every binding is listed once under its own key — what validation walks.
+    #[test]
+    fn every_binding_has_its_own_key() {
+        let keys: Vec<_> = PadAxesParams::default()
+            .bindings()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys.len(), 3 + 4 + 7 + 7);
+        assert!(keys.contains(&"pad_axes.drive.vyaw"));
+        assert!(keys.contains(&"pad_axes.body_pose.head_roll"));
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len());
     }
 }

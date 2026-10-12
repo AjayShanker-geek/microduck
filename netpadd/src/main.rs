@@ -44,12 +44,12 @@ struct Args {
     /// Exit 0 if `[netpad] enabled` says this daemon should run, 1 if not — for `ExecCondition=`.
     #[arg(long)]
     should_run: bool,
-    /// Deflection below this counts as centre — `padd`'s value.
-    #[arg(long, default_value_t = 0.1)]
-    deadzone: f64,
-    /// Full-deflection head travel, radians — `padd`'s value.
-    #[arg(long, default_value_t = 2.5)]
-    max_head: f64,
+    /// Over `pad_axes.deadzone`, as in `padd`.
+    #[arg(long, value_parser = pad_map::parse_deadzone)]
+    deadzone: Option<f64>,
+    /// Over every `[pad_head]` limit, as in `padd`.
+    #[arg(long, value_parser = pad_map::parse_max_head)]
+    max_head: Option<f64>,
 }
 
 #[cfg(test)]
@@ -59,8 +59,8 @@ impl Args {
             socket,
             config,
             should_run: false,
-            deadzone: 0.1,
-            max_head: 2.5,
+            deadzone: None,
+            max_head: None,
         }
     }
 }
@@ -145,15 +145,12 @@ async fn serve(
             return std::process::ExitCode::FAILURE;
         }
     };
-    let (bindings, imu_head, drive) = pad_map::read_bindings(&args.config);
-    let mut config = Config {
-        bindings,
-        imu_head,
-        drive,
+    let overrides = pad_map::Overrides {
         deadzone: args.deadzone,
         max_head: args.max_head,
-        roller,
     };
+    let mut config = Config::defaults(roller, &overrides);
+    config.reload(&args.config, &overrides);
     tracing::warn!(
         port,
         max_hz = np.max_hz,
@@ -247,9 +244,9 @@ async fn serve(
                 .ok();
             if at != config_at {
                 config_at = at;
-                (config.bindings, config.imu_head, config.drive) =
-                    pad_map::read_bindings(&args.config);
-                tracing::warn!("button bindings reloaded");
+                if config.reload(&args.config, &overrides) {
+                    tracing::warn!("controller settings reloaded");
+                }
             }
             match robot.ask_roller().await {
                 Ok(Some(r)) if r != config.roller => {
