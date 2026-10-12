@@ -30,27 +30,6 @@ cargo install --path duckctl
 duckctl --name <robot-name> info
 ```
 
-Or take the build CI makes of `main`, with no Rust toolchain. Pick the latest run:
-
-```bash
-export GH_REPO=pollen-robotics/microduck
-```
-
-```bash
-RUN=$(gh run list -w duckctl -b main -s success -L1 --json databaseId -q '.[].databaseId')
-```
-
-then download the archive for your machine — `duckctl-macos-arm64`, `duckctl-macos-x86_64`,
-`duckctl-linux-x86_64` or `duckctl-linux-aarch64`:
-
-```bash
-gh run download "$RUN" -n duckctl-macos-arm64
-```
-
-```bash
-tar -xzf duckctl-macos-arm64.tar.gz && sudo mv duckctl /usr/local/bin/
-```
-
 Every command below is written in the installed form. Prefix it with
 `cargo run -q -p duckctl --` to run it from the clone instead.
 
