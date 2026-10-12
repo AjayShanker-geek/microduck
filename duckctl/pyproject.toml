@@ -19,10 +19,12 @@ description = "Talk to a Microduck robot from a laptop — over Bluetooth LE, no
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.8"
+# Only names from the trove-classifiers list: PyPI refuses an upload carrying any other, and
+# `_build-duckctl.yml` checks them on every push so a bad one fails a branch rather than a release.
 classifiers = [
     "Programming Language :: Rust",
     "Environment :: Console",
-    "Topic :: Scientific/Engineering :: Robotics",
+    "Topic :: System :: Hardware",
 ]
 
 [project.urls]

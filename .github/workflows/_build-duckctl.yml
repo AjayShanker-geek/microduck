@@ -53,6 +53,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PyPI refuses the whole upload over one classifier it does not know — and only at upload, on a
+      # release tag, whose metadata is then fixed. `daemon-v0.16.2` was lost that way. Checked here,
+      # on every push, so it fails a branch instead. One platform is enough: the metadata is the same.
+      - name: Classifiers are ones PyPI knows
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/trove"
+          "$RUNNER_TEMP/trove/bin/pip" install -q trove-classifiers
+          "$RUNNER_TEMP/trove/bin/python" - <<'EOF'
+          import sys, tomllib
+          from trove_classifiers import classifiers
+          bad = [c for c in tomllib.load(open("duckctl/pyproject.toml", "rb"))["project"]["classifiers"] if c not in classifiers]
+          for c in bad:
+              print(f"::error file=duckctl/pyproject.toml::{c!r} is not a PyPI classifier")
+          sys.exit(1 if bad else 0)
+          EOF
+
       # `--locked`: the wheel is built from the lockfile CI tested, never a fresh resolve.
       - uses: PyO3/maturin-action@v1
         with:
