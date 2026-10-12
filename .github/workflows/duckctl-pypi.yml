@@ -13,8 +13,8 @@
 # secrets. It needs a publisher on PyPI naming this repository, this file and the `pypi`
 # environment — `docs/project/ci-setup.md` has the one-time setup.
 #
-# `workflow_dispatch` is for a tag that was cut before this workflow existed, or a run to repeat:
-# start it from the tag (Use workflow from → Tags → `daemon-vX.Y.Z`).
+# `workflow_dispatch` is for a tag a manual promotion created, which starts no workflow, or a run to
+# repeat: start it from the tag (Use workflow from → Tags → `daemon-vX.Y.Z`).
 name: duckctl to PyPI
 
 on:

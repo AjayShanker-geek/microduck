@@ -234,11 +234,14 @@ There is no token. PyPI trusts this workflow's OIDC identity, which needs a one-
    workflow `duckctl-pypi.yml`, environment `pypi`. The project is created by the first upload.
 2. Here, create a `pypi` environment under Settings → Environments. It holds no secrets; it is what
    the publisher names, so a different workflow cannot publish as this one.
-3. Publish the current release once: `gh workflow run duckctl-pypi --ref daemon-v<version>`.
+Both are done (2026-10-12). The first upload is the first `daemon-v*` tag cut after this workflow
+merged: a tag runs the workflow files *it* contains, so a release from before then cannot be
+published by dispatching from it — it has neither this workflow nor `duckctl/pyproject.toml`.
 
-The same dispatch covers a **manual promotion** (`gh workflow run promote`). That path creates the
-stable tag with `GITHUB_TOKEN`, and GitHub does not start workflows on a push made with it, so the
-tag push alone publishes nothing. Re-running is safe: files PyPI already has are skipped.
+A **manual promotion** (`gh workflow run promote`) needs one more step:
+`gh workflow run duckctl-pypi --ref daemon-v<version>`. That path creates the stable tag with
+`GITHUB_TOKEN`, and GitHub does not start workflows on a push made with it, so the tag alone
+publishes nothing. Re-running is safe: files PyPI already has are skipped.
 
 ## Rotating a key
 
