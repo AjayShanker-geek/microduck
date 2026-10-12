@@ -74,7 +74,14 @@ The other three keys are all read at start, so they too take a restart of both u
 ## Driving from a laptop
 
 ```bash
-duckctl udp-pad $(duckctl ip)
+duckctl udp-pad
+```
+
+Without an address it finds the robot over Bluetooth the way `duckctl ip` does, so `--name` and
+`DUCK_ROBOT` pick which one. An address skips that and works without Bluetooth:
+
+```bash
+duckctl udp-pad 192.168.1.42
 ```
 
 It reads the first gamepad plugged into the laptop and sends its state. A port on the end of the
