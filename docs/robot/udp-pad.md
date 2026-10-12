@@ -79,24 +79,38 @@ once `robotd`'s deadman runs out, and sits down a second after that.
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
 before sending. gilrs on macOS negates every pad's Y, and some pads already report up as positive.
 
-On a terminal it keeps a status block under its messages, redrawn ten times a second:
+On a terminal it takes the screen, as `robotctl monitor` does, and `q` quits:
 
 ```
-pad    Xbox 360 Controller · battery 70% · last input 12 ms ago
-input  L (+0.00, +0.85)  R (+0.00, +0.00)  LT 0.00  RT 0.40  [A] [START]
-send   30 Hz of 30 → 192.168.1.42:4210 · 0 failed
-duck   driving · rtt 3.1 ms · loss 0.0%
+┌ duck 192.168.1.42:4210 ─────────────────────────────────────────────────────┐
+│ ● CONNECTED  driving the duck                                               │
+│ rtt 3.1 ms · loss 0.0% · 0 stale                                            │
+│ rtt ms    ▁▁▁▁▂▁▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁                                       │
+└ rtt ≤50 ms ─────────────────────────────────────────────────────────────────┘
+┌ pad Xbox 360 Controller · battery 70% ──────────────────────────────────────┐
+│ left   X  ·······│·······  +0.00   Y  ·······│████···  +0.50                │
+│ right  X  ·······│·······  +0.00   Y  ·······│·······  +0.00                │
+│ trig   LT ···············  +0.00   RT ███████████████  +1.00                │
+│  A   B   X   Y   LB   RB   START   SELECT   UP   DOWN   LEFT   RIGHT   HOME │
+│ last input 12 ms ago · values as sent, before the duck's deadzone           │
+└ sending 30 Hz of 30 · 0 failed ─────────────────────────────────────────────┘
+┌ log ────────────────────────────────────────────────────────────────────────┐
+│ gamepad: Xbox 360 Controller — sending its state                            │
+│ ● CONNECTED — driving the duck                                              │
+└ q quit ─────────────────────────────────────────────────────────────────────┘
 ```
 
-`input` is what is sent, before the robot's deadzone. The `duck` line comes from the robot's
-[answers](#what-the-robot-answers):
+The duck block is green when connected, yellow when another client holds the robot, and red when
+it is not connected — its first line says which, and why. Held buttons are lit. The figures come
+from the robot's [answers](#what-the-robot-answers):
 
-| `duck` says | meaning |
+| the duck block says | meaning |
 |---|---|
-| `driving` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order |
-| `another client is driving it` | someone else holds the robot. This laptop is ignored until that one has been quiet for `timeout_ms` |
-| `no answer for …` | answers stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
-| `never answered` | sends go out and nothing has ever come back: nothing is listening on the port, or `netpadd` is older than its answers. Driving through an older `netpadd` still works |
+| `● CONNECTED` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order |
+| `◐ NOT DRIVING` | another client holds the robot. This laptop is ignored until that one has been quiet for `timeout_ms` |
+| `✕ NOT CONNECTED` — nothing listening | the robot's address refuses the port: `netpadd` is not running there, or `[netpad] enabled` is off |
+| `✕ NOT CONNECTED` — stopped answering | there were answers and they stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
+| `✕ NOT CONNECTED` — nothing answers | sends go out and nothing has ever come back: a wrong address, a firewall, or a `netpadd` older than its answers — which still drives |
 
 Piped to a file, it writes the same facts as one line every 10 seconds instead.
 

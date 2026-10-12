@@ -42,9 +42,12 @@ duck-ipc-proto = { path = "../duck-ipc-proto" }
 # the button bits come from the crate the robot decodes them with, `gilrs` reads the pad.
 pad-map = { path = "../pad-map" }
 gilrs = "0.11"
-# The status block `udp-pad` redraws in place under its notices. Already in the tree through
-# `robotctl`'s ratatui; used directly here, for a cursor move and a clear.
-crossterm = "0.29"
+# `udp-pad`'s live view, drawn as `robotctl monitor` draws its own: the same crate and features,
+# so the two look alike and restore the terminal the same way when something panics mid-frame.
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "crossterm",
+    "layout-cache",
+] }
 
 # `btleplug` rather than `bluer`, because this runs on a developer's machine: CoreBluetooth on
 # macOS, BlueZ on Linux, WinRT on Windows. `bluer` would make the client Linux-only, which defeats

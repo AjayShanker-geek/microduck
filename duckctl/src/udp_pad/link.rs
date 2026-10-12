@@ -5,6 +5,7 @@
 //! Nothing here can slow a send down: what was sent is a fixed ring, and an answer that never comes
 //! only makes the figures stale.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use pad_map::wire::{Status, Verdict};
@@ -26,6 +27,9 @@ const REFUSED_FOR: Duration = Duration::from_secs(2);
 
 /// Loss is the change in the duck's `accepted` count over the change in sends, over this window.
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
+
+/// Round trips kept for the trace: more than any terminal is wide.
+pub const RTT_SAMPLES: usize = 600;
 
 /// The smoothing of the round trip: a new sample counts for this much.
 const RTT_GAIN: f64 = 0.2;
@@ -58,6 +62,8 @@ pub struct Link {
     first_sent: Option<Instant>,
     last: Option<(Instant, Verdict)>,
     rtt: Option<Duration>,
+    /// Every round trip measured, newest first.
+    rtts: VecDeque<Duration>,
     /// Window start: when, and the duck's `accepted` then.
     window: Option<(Instant, u32)>,
     sends_in_window: u32,
@@ -75,6 +81,7 @@ impl Default for Link {
             first_sent: None,
             last: None,
             rtt: None,
+            rtts: VecDeque::with_capacity(RTT_SAMPLES),
             window: None,
             sends_in_window: 0,
             loss: None,
@@ -110,6 +117,10 @@ impl Link {
         let (seq, sent) = self.sent[s.seq as usize % RING];
         if let Some(sent) = sent.filter(|_| seq == s.seq) {
             let sample = at.saturating_duration_since(sent);
+            if self.rtts.len() == RTT_SAMPLES {
+                self.rtts.pop_back();
+            }
+            self.rtts.push_front(sample);
             self.rtt = Some(match self.rtt {
                 None => sample,
                 Some(r) => r.mul_f64(1.0 - RTT_GAIN) + sample.mul_f64(RTT_GAIN),
@@ -173,6 +184,11 @@ impl Link {
 
     pub fn rtt(&self) -> Option<Duration> {
         self.rtt
+    }
+
+    /// Every round trip measured, newest first.
+    pub fn rtts(&self) -> &VecDeque<Duration> {
+        &self.rtts
     }
 
     pub fn loss(&self) -> Option<f64> {

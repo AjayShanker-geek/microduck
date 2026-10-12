@@ -1,21 +1,41 @@
-//! What `duckctl udp-pad` shows while it runs: the pad, what it holds, the sends, the duck.
+//! What `duckctl udp-pad` shows while it runs: whether the duck is connected, the pad, and what
+//! it sends.
 //!
-//! On a terminal it is a block of lines redrawn in place under the notices, at most [`REDRAW`]
-//! often, so drawing never competes with sending. Piped, it is one summary line every
-//! [`SUMMARY`] — a log of a session should not be a screen's worth of redraws.
+//! Two renderings, chosen by where stdout goes, as `robotctl monitor` chooses:
+//!
+//!  - **a terminal**: a frame repainted in place, at most every [`REDRAW`], in the monitor's
+//!    look — bordered blocks, centred bars for the sticks, a trace drawn to a fixed scale — with
+//!    the notices in a log block, since the alternate screen has no scrollback.
+//!  - **anything else**: one summary line every [`SUMMARY`], because a log of a session should not
+//!    be a screen's worth of escape codes.
 
-use std::io::Write;
+use std::collections::VecDeque;
+use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
-use crossterm::style::{Color, Stylize};
-use crossterm::{cursor, queue, terminal};
 use pad_map::Buttons;
 use pad_map::wire::Packet;
+use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph, RenderDirection, Sparkline};
 
 use super::link::{Link, State};
 
 pub const REDRAW: Duration = Duration::from_millis(100);
 pub const SUMMARY: Duration = Duration::from_secs(10);
+
+/// The round trip at the top of the trace. A LAN answers in a few ms; a trace that reaches the
+/// top is a link worth looking at.
+const RTT_FULL_SCALE_MS: u64 = 50;
+
+/// Notices kept for the log block.
+const LOG_LINES: usize = 100;
+
+/// Cells of bar in a stick or trigger cell.
+const BAR: usize = 15;
 
 const NAMES: [(Buttons, &str); 13] = [
     (Buttons::A, "A"),
@@ -38,11 +58,13 @@ pub struct Pad<'a> {
     pub name: &'a str,
     /// gilrs' answer, already in words: "battery 70%", "wired", or nothing when it cannot tell.
     pub power: Option<String>,
+    /// On battery, and little of it left.
+    pub low_battery: bool,
     pub last_input: Option<Duration>,
     pub packet: Packet,
 }
 
-/// Everything one frame of the panel shows.
+/// Everything one frame shows.
 pub struct View<'a> {
     pub to: &'a str,
     pub pad: Option<Pad<'a>>,
@@ -56,28 +78,7 @@ pub struct View<'a> {
     pub now: Instant,
 }
 
-pub fn held(b: Buttons) -> String {
-    let names: Vec<_> = NAMES
-        .iter()
-        .filter(|(bit, _)| b.contains(*bit))
-        .map(|(_, n)| format!("[{n}]"))
-        .collect();
-    if names.is_empty() {
-        "—".to_owned()
-    } else {
-        names.join(" ")
-    }
-}
-
-fn ms(d: Duration) -> String {
-    if d >= Duration::from_secs(10) {
-        format!("{} s", d.as_secs())
-    } else {
-        format!("{} ms", d.as_millis())
-    }
-}
-
-/// Whether this laptop reaches the duck, in one word — the first thing the block says.
+/// Whether this laptop reaches the duck, in one word — the first thing the frame says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Connected,
@@ -134,141 +135,373 @@ pub fn verdict(to: &str, state: State) -> Option<(Verdict, String)> {
     })
 }
 
-fn robot(v: &View) -> (Verdict, String) {
-    let l = v.link;
-    let state = l.state(v.now);
-    let Some((verdict, why)) = verdict(v.to, state) else {
+/// The verdict as the frame shows it, with a reason even when there is no notice to give.
+fn duck(v: &View) -> (Verdict, String) {
+    verdict(v.to, v.link.state(v.now)).unwrap_or_else(|| {
         let why = if v.pad.is_none() {
             "nothing is sent without a pad"
         } else {
             "waiting for the duck's first answer"
         };
-        return (Verdict::Pending, why.to_owned());
-    };
-    if state != State::Driving {
-        return (verdict, why);
-    }
-    let mut f = Vec::new();
-    if let Some(rtt) = l.rtt() {
-        f.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1e3));
-    }
-    if let Some(loss) = l.loss() {
-        f.push(format!("loss {:.1}%", loss * 100.0));
-    }
-    if let Some(stale) = l.stale().filter(|n| *n > 0) {
-        f.push(format!("{stale} stale"));
-    }
-    if let Some(bad) = l.malformed().filter(|n| *n > 0) {
-        f.push(format!("{bad} malformed on its port"));
-    }
-    (verdict, f.join(" · "))
+        (Verdict::Pending, why.to_owned())
+    })
 }
 
-/// The block: the duck's verdict first, then one string per line.
-pub fn lines(v: &View) -> (Verdict, [String; 4]) {
-    let (pad, input) = match &v.pad {
-        None if v.searching => ("looking for one…".to_owned(), "—".to_owned()),
-        None => ("none — plug one in".to_owned(), "—".to_owned()),
-        Some(p) => {
-            let mut pad = p.name.to_owned();
-            if let Some(power) = &p.power {
-                pad += &format!(" · {power}");
-            }
-            if let Some(d) = p.last_input {
-                pad += &format!(" · last input {} ago", ms(d));
-            }
-            let f = p.packet.frame(Buttons::NONE, Buttons::NONE);
-            let input = format!(
-                "L ({:+.2}, {:+.2})  R ({:+.2}, {:+.2})  LT {:.2}  RT {:.2}  {}",
-                f.left_x,
-                f.left_y,
-                f.right_x,
-                f.right_y,
-                f.lt,
-                f.rt,
-                held(f.held)
-            );
-            (pad, input)
+/// The link's figures, while there are any to give.
+fn figures(link: &Link) -> Vec<String> {
+    let mut f = Vec::new();
+    if let Some(rtt) = link.rtt() {
+        f.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1e3));
+    }
+    if let Some(loss) = link.loss() {
+        f.push(format!("loss {:.1}%", loss * 100.0));
+    }
+    if let Some(stale) = link.stale() {
+        f.push(format!("{stale} stale"));
+    }
+    if let Some(bad) = link.malformed().filter(|n| *n > 0) {
+        f.push(format!("{bad} malformed on its port"));
+    }
+    f
+}
+
+fn ms(d: Duration) -> String {
+    if d >= Duration::from_secs(10) {
+        format!("{} s", d.as_secs())
+    } else {
+        format!("{} ms", d.as_millis())
+    }
+}
+
+fn pad_words(v: &View) -> String {
+    match &v.pad {
+        None if v.searching => "looking for a gamepad…".to_owned(),
+        None => "no gamepad — plug one in".to_owned(),
+        Some(p) => match &p.power {
+            Some(power) => format!("{} · {power}", p.name),
+            None => p.name.to_owned(),
+        },
+    }
+}
+
+/// One line for a log: the verdict first, then the pad and the sends.
+pub fn summary(v: &View) -> String {
+    let (verdict, why) = duck(v);
+    let mut duck = format!("{} {why}", verdict.word());
+    if verdict == Verdict::Connected {
+        for f in figures(v.link) {
+            duck += &format!(" · {f}");
         }
-    };
+    }
     let rate = v.rate.map_or("—".to_owned(), |r| r.to_string());
-    let (verdict, why) = robot(v);
-    (
-        verdict,
-        [
-            format!("duck   {} {why}", verdict.word()),
-            format!("pad    {pad}"),
-            format!("input  {input}"),
-            format!(
-                "send   {rate} Hz of {} → {} · {} failed",
-                v.hz, v.to, v.failed
-            ),
-        ],
+    format!(
+        "{duck} | {} | {rate} Hz of {} → {} · {} failed",
+        pad_words(v),
+        v.hz,
+        v.to,
+        v.failed
     )
 }
 
-/// One line for a log: the same facts, flattened.
-pub fn summary(v: &View) -> String {
-    let (_, [duck, pad, _, send]) = lines(v);
-    let squash = |s: String| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{} | {} | {}", squash(duck), squash(pad), squash(send))
+/// A bar growing from the middle of `width` cells, for a stick at rest at centre — drawn as
+/// `robotctl monitor` draws a pad axis, so a pad reads the same in both.
+fn centred_bar(value: f64, width: usize) -> String {
+    let half = width / 2;
+    let offset = (value.clamp(-1.0, 1.0) * half as f64).round();
+    let cells = (offset.abs() as usize).min(half);
+    if offset < 0.0 {
+        format!(
+            "{}{}│{}",
+            "·".repeat(half - cells),
+            "█".repeat(cells),
+            "·".repeat(width - half - 1)
+        )
+    } else {
+        format!(
+            "{}│{}{}",
+            "·".repeat(half),
+            "█".repeat(cells),
+            "·".repeat(width - half - 1 - cells)
+        )
+    }
 }
 
-/// The block on a terminal, under whatever notices have been printed.
+fn filled_bar(value: f64, width: usize) -> String {
+    let filled = (value.clamp(0.0, 1.0) * width as f64).round() as usize;
+    format!("{}{}", "█".repeat(filled), "·".repeat(width - filled))
+}
+
+fn axis(name: &str, bar: String, value: f64) -> [Span<'static>; 3] {
+    [
+        Span::raw(format!(" {name:<3}")),
+        Span::styled(bar, Style::new().fg(Color::Cyan)),
+        Span::raw(format!("{value:>+7.2}  ")),
+    ]
+}
+
+/// Every button, the held ones lit: what is *not* held is as much the answer as what is.
+fn buttons(held: Buttons) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (bit, name) in NAMES {
+        spans.push(if held.contains(bit) {
+            Span::styled(
+                format!(" {name} "),
+                Style::new()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(format!(" {name} ")).dim()
+        });
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
+/// The frame on a terminal, and the notices it keeps.
 pub struct Screen {
-    drawn: u16,
+    terminal: DefaultTerminal,
+    log: VecDeque<String>,
 }
 
 impl Screen {
-    pub fn new() -> Self {
-        Self { drawn: 0 }
+    /// The full-screen view when stdout is a terminal; `None` otherwise.
+    pub fn open() -> Option<Self> {
+        std::io::stdout().is_terminal().then(|| Self {
+            terminal: ratatui::init(),
+            log: VecDeque::new(),
+        })
     }
 
-    fn clear(&mut self, out: &mut impl Write) -> std::io::Result<()> {
-        if self.drawn > 0 {
-            queue!(
-                out,
-                cursor::MoveToPreviousLine(self.drawn),
-                terminal::Clear(terminal::ClearType::FromCursorDown)
-            )?;
-            self.drawn = 0;
-        }
-        Ok(())
-    }
-
-    /// A notice goes above the block, which is redrawn on the next [`Screen::draw`].
     pub fn notice(&mut self, line: &str) {
-        let mut err = std::io::stderr().lock();
-        let _ = self.clear(&mut err);
-        let _ = writeln!(err, "{line}");
-        let _ = err.flush();
+        if self.log.len() == LOG_LINES {
+            self.log.pop_front();
+        }
+        self.log.push_back(line.to_owned());
     }
 
-    /// The block, its first line — the verdict — in the verdict's colour, bold.
-    pub fn draw(&mut self, verdict: Verdict, lines: &[String]) {
-        let mut err = std::io::stderr().lock();
-        let _ = self.clear(&mut err);
-        let width = terminal::size().map_or(usize::MAX, |(w, _)| usize::from(w.max(1)));
-        for (i, line) in lines.iter().enumerate() {
-            // Cut, not wrapped: a wrapped line would throw the count off, and the redraw with it.
-            let cut: String = line.chars().take(width.saturating_sub(1)).collect();
-            match verdict.color().filter(|_| i == 0) {
-                Some(c) => {
-                    let _ = writeln!(err, "{}", cut.with(c).bold());
-                }
-                None => {
-                    let _ = writeln!(err, "{cut}");
-                }
+    /// Whether a quit key was pressed. Never waits: raw mode delivers Ctrl-C as a key, so it has
+    /// to be read here, and reading must not hold up a send.
+    pub fn quit(&mut self) -> bool {
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read()
+                && key.kind == KeyEventKind::Press
+                && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+            {
+                return true;
             }
         }
-        self.drawn = lines.len() as u16;
-        let _ = err.flush();
+        false
     }
+
+    pub fn draw(&mut self, v: &View) {
+        let log = &self.log;
+        let _ = self.terminal.draw(|frame| render(frame, v, log));
+    }
+}
+
+impl Drop for Screen {
+    /// The terminal back as it was, however the loop ends. A panic is covered by the hook
+    /// `ratatui::init` installs.
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+fn render(frame: &mut ratatui::Frame, v: &View, log: &VecDeque<String>) {
+    let [duck_area, pad_area, log_area] = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Length(7),
+        Constraint::Min(3),
+    ])
+    .areas(frame.area());
+    render_duck(frame, v, duck_area);
+    render_pad(frame, v, pad_area);
+
+    let block = Block::bordered()
+        .title(" log ")
+        .title_bottom(Line::from(" q quit ").dim());
+    let height = usize::from(block.inner(log_area).height);
+    let shown: Vec<Line> = log
+        .iter()
+        .skip(log.len().saturating_sub(height))
+        .map(|l| Line::from(format!(" {l}")))
+        .collect();
+    frame.render_widget(Paragraph::new(shown).block(block), log_area);
+}
+
+/// Is the duck there, and how good is the way to it.
+fn render_duck(frame: &mut ratatui::Frame, v: &View, area: Rect) {
+    let (verdict, why) = duck(v);
+    let mut block = Block::bordered()
+        .title(Line::from(vec![
+            Span::raw(" duck "),
+            Span::styled(
+                v.to.to_owned(),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .title_bottom(Line::from(format!(" rtt ≤{RTT_FULL_SCALE_MS} ms ")).dim());
+    if let Some(c) = verdict.color() {
+        // The whole block in the verdict's colour: seen from across the room, not read.
+        block = block.border_style(Style::new().fg(c));
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [head, numbers, trace] = Layout::vertical([Constraint::Length(1); 3]).areas(inner);
+
+    let word = match verdict.color() {
+        Some(c) => Span::styled(
+            verdict.word(),
+            Style::new().fg(c).add_modifier(Modifier::BOLD),
+        ),
+        None => Span::raw(verdict.word()).dim(),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            word,
+            Span::raw(format!("  {why}")),
+        ])),
+        head,
+    );
+    let numbers_line = if verdict == Verdict::Connected {
+        Line::from(format!(" {}", figures(v.link).join(" · ")))
+    } else {
+        // The figures of a link that is not there would read as a link that is.
+        Line::from(" —").dim()
+    };
+    frame.render_widget(Paragraph::new(numbers_line), numbers);
+
+    let [label, spark] =
+        Layout::horizontal([Constraint::Length(10), Constraint::Min(8)]).areas(trace);
+    frame.render_widget(Paragraph::new(Line::from(" rtt ms").dim()), label);
+    // In µs, floored at one level as the monitor's gap trace is: a perfect link must not draw as
+    // an empty row, which is what a trace nobody feeds looks like.
+    let full = RTT_FULL_SCALE_MS * 1000;
+    let floor = full.div_ceil(8);
+    let data: Vec<u64> = v
+        .link
+        .rtts()
+        .iter()
+        .map(|d| (d.as_micros() as u64).max(floor))
+        .collect();
+    frame.render_widget(
+        Sparkline::default()
+            .data(data)
+            .direction(RenderDirection::RightToLeft)
+            .max(full)
+            .style(Style::new().fg(Color::Cyan)),
+        spark,
+    );
+}
+
+/// The pad, what it holds, and how fast it goes out.
+fn render_pad(frame: &mut ratatui::Frame, v: &View, area: Rect) {
+    let mut title = vec![Span::raw(" pad ")];
+    match &v.pad {
+        Some(p) => {
+            title.push(Span::styled(
+                p.name.to_owned(),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+            if let Some(power) = &p.power {
+                let style = if p.low_battery {
+                    Style::new().fg(Color::Yellow)
+                } else {
+                    Style::new().add_modifier(Modifier::DIM)
+                };
+                title.push(Span::styled(format!(" · {power}"), style));
+            }
+            title.push(Span::raw(" "));
+        }
+        None => title.push(Span::styled(
+            format!("· {} ", pad_words(v)),
+            Style::new().fg(Color::Yellow),
+        )),
+    }
+    let rate = v.rate.map_or("—".to_owned(), |r| r.to_string());
+    let failed = if v.failed > 0 {
+        Span::styled(
+            format!("· {} failed ", v.failed),
+            Style::new().fg(Color::Red),
+        )
+    } else {
+        Span::raw("· 0 failed ").dim()
+    };
+    let block = Block::bordered()
+        .title(Line::from(title))
+        .title_bottom(Line::from(vec![
+            Span::raw(format!(" sending {rate} Hz of {} ", v.hz)).dim(),
+            failed,
+        ]));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(p) = &v.pad else {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(" nothing is sent without a pad: the duck stops, then sits").dim(),
+                Line::from(" plug a gamepad into this machine — it is picked up as it arrives")
+                    .dim(),
+            ]),
+            inner,
+        );
+        return;
+    };
+    let f = p.packet.frame(Buttons::NONE, Buttons::NONE);
+    let [left, right, triggers, held, age] =
+        Layout::vertical([Constraint::Length(1); 5]).areas(inner);
+    let row = |name: &str, a: [Span<'static>; 3], b: [Span<'static>; 3]| {
+        let mut spans = vec![Span::raw(format!(" {name:<6}"))];
+        spans.extend(a);
+        spans.extend(b);
+        Paragraph::new(Line::from(spans))
+    };
+    frame.render_widget(
+        row(
+            "left",
+            axis("X", centred_bar(f.left_x, BAR), f.left_x),
+            axis("Y", centred_bar(f.left_y, BAR), f.left_y),
+        ),
+        left,
+    );
+    frame.render_widget(
+        row(
+            "right",
+            axis("X", centred_bar(f.right_x, BAR), f.right_x),
+            axis("Y", centred_bar(f.right_y, BAR), f.right_y),
+        ),
+        right,
+    );
+    frame.render_widget(
+        row(
+            "trig",
+            axis("LT", filled_bar(f.lt, BAR), f.lt),
+            axis("RT", filled_bar(f.rt, BAR), f.rt),
+        ),
+        triggers,
+    );
+    frame.render_widget(Paragraph::new(buttons(f.held)), held);
+    let input = match p.last_input {
+        Some(d) => format!(
+            " last input {} ago · values as sent, before the duck's deadzone",
+            ms(d)
+        ),
+        None => " values as sent, before the duck's deadzone".to_owned(),
+    };
+    frame.render_widget(Paragraph::new(Line::from(input).dim()), age);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     /// Every state that is not driving this robot says NOT, and says why.
     #[test]
@@ -296,43 +529,67 @@ mod tests {
     }
 
     #[test]
-    fn held_buttons_are_named_in_wire_order() {
-        assert_eq!(held(Buttons::NONE), "—");
-        assert_eq!(held(Buttons::START | Buttons::A), "[A] [START]");
+    fn bars_grow_from_the_middle_and_from_the_left() {
+        assert_eq!(centred_bar(0.0, 5), "··│··");
+        assert_eq!(centred_bar(1.0, 5), "··│██");
+        assert_eq!(centred_bar(-1.0, 5), "██│··");
+        assert_eq!(filled_bar(0.5, 4), "██··");
     }
 
-    #[test]
-    fn the_block_says_what_the_pad_holds_and_how_the_duck_answers() {
-        let link = Link::default();
-        let packet = Packet::from_axes(1, 0, [0.0, 0.5, 0.0, 0.0], [0.0, 1.0], Buttons::B);
-        let v = View {
+    fn view<'a>(link: &'a Link, pad: Option<Pad<'a>>) -> View<'a> {
+        View {
             to: "duck.local:4210",
-            pad: Some(Pad {
-                name: "Xbox Wireless Controller",
-                power: Some("battery 70%".to_owned()),
-                last_input: Some(Duration::from_millis(12)),
-                packet,
-            }),
+            pad,
             searching: false,
             hz: 30,
             rate: Some(30),
             failed: 0,
-            link: &link,
+            link,
             now: Instant::now(),
-        };
-        let (verdict, [duck, pad, input, send]) = lines(&v);
-        assert_eq!(verdict, Verdict::Pending);
-        assert!(
-            pad.contains("Xbox") && pad.contains("70%") && pad.contains("12 ms"),
-            "{pad}"
-        );
-        assert!(
-            input.contains("+0.50") && input.contains("RT 1.00") && input.contains("[B]"),
-            "{input}"
-        );
-        assert!(send.contains("30 Hz of 30"), "{send}");
-        assert!(duck.contains("waiting"), "{duck}");
-        assert!(summary(&v).starts_with("duck"), "the verdict leads");
-        assert!(!summary(&v).contains('\n'));
+        }
+    }
+
+    fn screen(v: &View) -> String {
+        let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        t.draw(|f| render(f, v, &VecDeque::from(["a notice".to_owned()])))
+            .unwrap();
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_frame_shows_the_pad_its_buttons_and_the_log() {
+        let link = Link::default();
+        let packet = Packet::from_axes(1, 0, [0.0, 0.5, 0.0, 0.0], [0.0, 1.0], Buttons::B);
+        let s = screen(&view(
+            &link,
+            Some(Pad {
+                name: "Xbox Wireless Controller",
+                power: Some("battery 70%".to_owned()),
+                low_battery: false,
+                last_input: Some(Duration::from_millis(12)),
+                packet,
+            }),
+        ));
+        assert!(s.contains("Xbox Wireless Controller · battery 70%"), "{s}");
+        assert!(s.contains("+0.50") && s.contains("+1.00"), "{s}");
+        assert!(s.contains(" START ") && s.contains(" B "), "{s}");
+        assert!(s.contains("connecting"), "{s}");
+        assert!(s.contains("a notice"), "{s}");
+    }
+
+    #[test]
+    fn no_pad_says_so_in_the_pad_block() {
+        let link = Link::default();
+        let s = screen(&view(&link, None));
+        assert!(s.contains("no gamepad — plug one in"), "{s}");
+        assert!(summary(&view(&link, None)).starts_with("… connecting"));
     }
 }

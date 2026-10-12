@@ -1174,12 +1174,12 @@ version = "0.16.1"
 dependencies = [
  "btleplug",
  "clap",
- "crossterm",
  "duck-ble",
  "duck-ipc-proto",
  "futures",
  "gilrs",
  "pad-map",
+ "ratatui",
  "serde_json",
  "tokio",
  "webbrowser",

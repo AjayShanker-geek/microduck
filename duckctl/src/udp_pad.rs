@@ -7,7 +7,6 @@
 //! Bluetooth pad goes away.
 
 use std::hash::{BuildHasher, Hasher};
-use std::io::IsTerminal;
 use std::net::UdpSocket;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -251,7 +250,7 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
     let mut notices = Notices::default();
     let (mut link, mut rate, mut failed) = (Link::default(), Rate::default(), 0u64);
     let mut last_input = None::<(GamepadId, Instant)>;
-    let mut screen = std::io::stderr().is_terminal().then(Screen::new);
+    let mut screen = Screen::open();
     let mut shown = None::<Instant>;
     let say = |screen: &mut Option<Screen>, line: String| match screen {
         Some(s) => s.notice(&line),
@@ -263,6 +262,9 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
     );
 
     loop {
+        if screen.as_mut().is_some_and(Screen::quit) {
+            return Ok(());
+        }
         while let Some(ev) = gilrs.next_event() {
             last_input = Some((ev.id, Instant::now()));
         }
@@ -358,6 +360,7 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 pad: pad.as_ref().map(|(id, p)| panel::Pad {
                     name: p.name(),
                     power: power(p.power_info()),
+                    low_battery: matches!(p.power_info(), PowerInfo::Discharging(n) if n <= 15),
                     last_input: last_input
                         .filter(|(at_id, _)| at_id == id)
                         .map(|(_, at)| now.duration_since(at)),
@@ -370,10 +373,7 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 now,
             };
             match &mut screen {
-                Some(s) => {
-                    let (verdict, lines) = panel::lines(&view);
-                    s.draw(verdict, &lines);
-                }
+                Some(s) => s.draw(&view),
                 None => eprintln!("{}", panel::summary(&view)),
             }
         }
