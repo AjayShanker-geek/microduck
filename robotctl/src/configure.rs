@@ -1156,7 +1156,7 @@ mod tests {
             let value = match key {
                 "pad_imu_head_control.enabled" => "true",
                 "pad_imu_head_control.gain" | "pad_drive.vx_max" => "0.5",
-                "pad_drive.vyaw_min" => "-1.0",
+                "pad_drive.vyaw_min" => "-1.2",
                 _ => "walk",
             };
             m.edit(entry(key), value).expect("valid");

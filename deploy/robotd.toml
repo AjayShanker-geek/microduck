@@ -545,9 +545,9 @@ mode = "walk"
 # This is what the pad asks for, not a limit on the robot: the policy only follows commands
 # inside the range it was trained on.
 # [pad_drive]
-# vx_max = 0.3
-# vx_min = -0.3
+# vx_max = 0.4
+# vx_min = -0.4
 # vy_max = 0.3
 # vy_min = -0.3
-# vyaw_max = 1.5
-# vyaw_min = -1.5
+# vyaw_max = 1.0
+# vyaw_min = -1.0
