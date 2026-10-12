@@ -149,7 +149,7 @@ const GILRS: [(Button, Buttons); 13] = [
 /// millisecond and the cap, not the polling, is what decides when it goes.
 const POLL: Duration = Duration::from_millis(1);
 
-pub fn run(host: &str, hz: u32) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut gilrs = Gilrs::new().map_err(|e| format!("no gamepad subsystem: {e}"))?;
     let to = target(host);
     let socket = UdpSocket::bind("0.0.0.0:0")?;
@@ -180,15 +180,16 @@ pub fn run(host: &str, hz: u32) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(b, _)| pad.is_pressed(*b))
             .fold(Buttons::NONE, |a, (_, bit)| a | *bit);
         let trigger = |b: Button| f64::from(pad.button_data(b).map_or(0.0, |d| d.value()));
+        let y = if invert_y { -1.0 } else { 1.0 };
         let now = Instant::now();
         let mut packet = Packet::from_axes(
             0,
             now.duration_since(started).as_millis() as u32,
             [
                 f64::from(pad.value(Axis::LeftStickX)),
-                f64::from(pad.value(Axis::LeftStickY)),
+                y * f64::from(pad.value(Axis::LeftStickY)),
                 f64::from(pad.value(Axis::RightStickX)),
-                f64::from(pad.value(Axis::RightStickY)),
+                y * f64::from(pad.value(Axis::RightStickY)),
             ],
             [
                 trigger(Button::LeftTrigger2),

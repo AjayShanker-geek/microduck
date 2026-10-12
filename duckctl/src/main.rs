@@ -1142,6 +1142,10 @@ enum Command {
         /// Most datagrams a second.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(10..=100))]
         hz: u32,
+        /// Flip both sticks' Y before sending, for a pad that drives backwards. gilrs on macOS
+        /// negates every pad's Y, and some pads already report up as positive.
+        #[arg(long)]
+        invert_y: bool,
     },
     /// Reboot it.
     Reboot,
@@ -1440,8 +1444,8 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     // Before anything Bluetooth: this command talks UDP to an address it was given.
-    if let Command::UdpPad { host, hz } = &cli.command {
-        return udp_pad::run(host, *hz);
+    if let Command::UdpPad { host, hz, invert_y } = &cli.command {
+        return udp_pad::run(host, *hz, *invert_y);
     }
     // Read once, here, so everything below asks `target` rather than the environment: which robot
     // was chosen and who chose it is one decision, and a second reader of `DUCK_ROBOT` could

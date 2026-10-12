@@ -76,6 +76,9 @@ the robot can tell a still pad from a gone one. With no pad on the laptop it sen
 robot times it out as it would a Bluetooth pad that went away. `Ctrl-C` ends it: the robot stops
 once `robotd`'s deadman runs out, and sits down a second after that.
 
+If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
+before sending. gilrs on macOS negates every pad's Y, and some pads already report up as positive.
+
 ## Writing your own sender
 
 One datagram carries the whole state. Every field is little-endian, and the packet is 28 bytes:
