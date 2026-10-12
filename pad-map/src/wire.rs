@@ -138,7 +138,10 @@ pub const STATUS_MAGIC: [u8; 4] = *b"DKST";
 pub const STATUS_VERSION: u8 = 1;
 /// No longer than a pad datagram, so an answer never amplifies what it answers.
 pub const STATUS_LEN: usize = 24;
-const _: () = assert!(STATUS_LEN <= LEN, "an answer must never outgrow what it answers");
+const _: () = assert!(
+    STATUS_LEN <= LEN,
+    "an answer must never outgrow what it answers"
+);
 
 /// What became of the datagram a [`Status`] answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
