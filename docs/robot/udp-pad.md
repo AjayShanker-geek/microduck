@@ -128,7 +128,7 @@ from the robot's [answers](#what-the-robot-answers):
 
 | the duck block says | meaning |
 |---|---|
-| `● CONNECTED` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order |
+| `● CONNECTED` | the robot takes this laptop's datagrams. `rtt` is the round trip, `loss` the share of the last second's datagrams the robot did not count, and `stale` the ones it dropped as out of order or late |
 | `✕ REFUSED` | another client is driving the robot, and only one may at a time. This laptop is ignored until that one has been quiet for `timeout_ms`, then takes over |
 | `✕ NOT CONNECTED` — nothing listening | the robot's address refuses the port: `netpadd` is not running there, or `[netpad] enabled` is off |
 | `✕ NOT CONNECTED` — stopped answering | there were answers and they stopped. The Wi-Fi, the robot rebooting, or `netpadd` restarting |
@@ -155,7 +155,7 @@ One datagram carries the whole state. Every field is little-endian, and the pack
 | 4 | 1 | version | `1` |
 | 5 | 1 | flags | reserved: send 0, the receiver ignores it |
 | 6 | 4 | seq | u32, +1 per datagram, wraps |
-| 10 | 4 | t_ms | u32, the sender's own clock; logged for jitter, never compared with the robot's |
+| 10 | 4 | t_ms | u32, the sender's own clock in ms, starting anywhere; how late a datagram arrived is read from it. `0` means none, and nothing is checked |
 | 14 | 12 | axes | i16 ×6: lx ly rx ry (±32767 maps to ±1, up is positive), lt rt (0..32767 maps to 0..1) |
 | 26 | 2 | buttons | u16: bit 0 A, 1 B, 2 X, 3 Y, 4 LB, 5 RB, 6 Start, 7 Select, 8 Up, 9 Down, 10 Left, 11 Right, 12 Home |
 
@@ -200,6 +200,9 @@ The rules a sender follows, and why:
   newer than the last, which is how a reordered one never moves the robot backwards, and one more
   than 1000 ahead of it, so a sender must never skip ahead. A random start
   means a restarted sender is not mistaken for a stale one.
+- **Stamp `t_ms` from a monotonic clock in milliseconds.** The robot never syncs with it: it
+  compares each datagram's delivery against the fastest it has seen from the same stream, so any
+  starting point works, but a clock that jumps reads as late for a second before it is taken.
 - **Send on change, plus a keepalive every `1/hz`.** The change is what makes it feel immediate; the
   keepalive is what tells the robot you are still there.
 - **Stop sending to let go.** There is no goodbye packet. Silence is the signal, and it is the same
@@ -220,7 +223,7 @@ the robot waits for them to be read.
 | 5 | 1 | verdict | `1` driving: this client holds the robot. `2` busy: another client does |
 | 6 | 4 | seq | u32, the `seq` of the datagram answered |
 | 10 | 4 | accepted | u32, datagrams taken from the client holding the robot |
-| 14 | 4 | stale | u32, datagrams from that client dropped as not newer, or more than 1000 ahead |
+| 14 | 4 | stale | u32, datagrams from that client dropped as not newer, more than 1000 ahead, or late |
 | 18 | 4 | malformed | u32, datagrams on the port that were not pad state, from anyone |
 | 22 | 2 | reserved | `0` |
 
@@ -262,6 +265,14 @@ added to `robot.health` reaches this report without a change to the format.
   change that arrives inside the interval waits for the next slot rather than being dropped. A
   press and release that both land between two slots still fire, because buttons are compared per
   datagram, not per slot.
+- **A datagram delivered late is dropped.** Wi-Fi can hold datagrams for seconds and release them
+  at once, in order, so each is still the newest. One that took more than `timeout_ms` longer than
+  the fastest delivery seen from the same stream is dropped and counted as stale, and buttons
+  pressed in it fire nothing: it says what the pad did, not what it does. The count is logged at
+  most once every 10 seconds. A stream is the same sender continuing its `seq`, across a silence
+  too, so a backlog that arrives after the client counted as gone is still dropped; a restarted
+  sender is a new one, judged by its own clock. Late without a break for a whole second is the
+  sender's clock having moved, not a backlog, and the stream is taken again.
 - **The first sender holds it.** The robot locks to the address of the first datagram it accepts and
   drops datagrams from any other address until that one has been silent for `timeout_ms`, so two
   people driving honestly cannot fight over one duck. It is not protection: see [trust](#trust).

@@ -23,7 +23,8 @@ pub struct Packet {
     /// +1 per datagram, wrapping. The receiver drops anything not newer than what it has, or
     /// more than 1000 ahead of it.
     pub seq: u32,
-    /// The sender's own clock, ms. For jitter in logs only; never compared with the robot's.
+    /// The sender's own clock, ms, starting anywhere; `netpadd` reads from it how late a datagram
+    /// arrived. `0` is no clock.
     pub t_ms: u32,
     /// lx ly rx ry (±32767 is ±1, up positive), lt rt (0..32767 is 0..1).
     pub axes: [i16; 6],
@@ -188,7 +189,7 @@ pub struct Status {
     pub seq: u32,
     /// Datagrams taken from the driving client.
     pub accepted: u32,
-    /// Datagrams from the driving client dropped as not newer, or too far ahead.
+    /// Datagrams from the driving client dropped as not newer, too far ahead, or late.
     pub stale: u32,
     /// Datagrams that were not pad state at all, from anyone.
     pub malformed: u32,

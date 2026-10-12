@@ -65,9 +65,10 @@ impl Args {
     }
 }
 
-/// Malformed datagrams are logged with their count at most this often: a LAN can hold a noisy
-/// neighbour, and one line per packet would bury the journal.
-const MALFORMED_LOG: Duration = Duration::from_secs(10);
+/// Malformed and late datagrams are each logged with their count at most this often: a LAN can
+/// hold a noisy neighbour, a backlog is hundreds at once, and one line per packet would bury the
+/// journal.
+const DROPPED_LOG: Duration = Duration::from_secs(10);
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
@@ -172,6 +173,7 @@ async fn serve(
         .and_then(|m| m.modified())
         .ok();
     let (mut malformed, mut malformed_logged) = (0u64, None::<Instant>);
+    let (mut late, mut late_logged) = (0u64, None::<Instant>);
     let mut answers = Answers::default();
     let mut reserved_logged = false;
     // A client that was driving and went quiet: the robot sits after a second — `pad_map::loss`,
@@ -219,9 +221,16 @@ async fn serve(
                         }
                         Accept::Malformed(e) => {
                             malformed += 1;
-                            if malformed_logged.is_none_or(|at| now.duration_since(at) >= MALFORMED_LOG) {
+                            if malformed_logged.is_none_or(|at| now.duration_since(at) >= DROPPED_LOG) {
                                 tracing::warn!(%from, error = %e, malformed, "dropping datagrams that are not pad state");
                                 malformed_logged = Some(now);
+                            }
+                        }
+                        Accept::Late => {
+                            late += 1;
+                            if late_logged.is_none_or(|at| now.duration_since(at) >= DROPPED_LOG) {
+                                tracing::warn!(%from, late, "dropping datagrams delivered later than timeout_ms — a backlog on the link");
+                                late_logged = Some(now);
                             }
                         }
                         Accept::Taken | Accept::Stale | Accept::OtherPeer => {}
@@ -362,7 +371,7 @@ impl Answers {
                 self.accepted = self.accepted.wrapping_add(1);
                 Verdict::Driving
             }
-            Accept::Stale => {
+            Accept::Stale | Accept::Late => {
                 self.stale = self.stale.wrapping_add(1);
                 Verdict::Driving
             }
