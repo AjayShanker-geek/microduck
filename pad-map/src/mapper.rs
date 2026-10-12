@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(
             frame,
             vec![proto::Call::RobotMove(proto::MoveParams {
-                vx: 0.3,
+                vx: 0.4,
                 vy: 0.0,
                 vyaw: 0.0
             })]
@@ -808,9 +808,9 @@ mod tests {
         };
         // Left stick up and to the left: forward, turning left.
         let twist = walking.walk(1.0, 0.0, -1.0);
-        assert_eq!(twist.vx, 0.3);
+        assert_eq!(twist.vx, 0.4);
         assert_eq!(twist.vy, 0.0);
-        assert_eq!(twist.vyaw, 1.5, "stick left turns left (positive yaw)");
+        assert_eq!(twist.vyaw, 1.0, "stick left turns left (positive yaw)");
         assert_eq!(
             walking.walk(-1.0, 0.0, 0.0).vx,
             -0.2,

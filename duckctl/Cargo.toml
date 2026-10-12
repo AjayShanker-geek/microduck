@@ -79,6 +79,14 @@ webbrowser = "1.2.4"
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
+# libdbus compiled in rather than linked, so the Linux binary needs nothing from the machine but
+# the D-Bus daemon BlueZ already runs. That is what lets one wheel serve every distribution
+# (`uvx duckctl`, see `pyproject.toml`): a dynamically linked libdbus is outside the manylinux
+# policy, so the wheel would have to graft a copy in anyway. It also drops `libdbus-1-dev` from
+# what a `cargo install` needs. Not a dependency of ours to call — only its feature matters here.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2", features = ["vendored"] }
+
 # `advwatch` measures how often an advertisement actually arrives. It lives here rather than with
 # `btd` for the same reason the client does: it is a scanner, and scanners run on laptops.
 [[example]]
