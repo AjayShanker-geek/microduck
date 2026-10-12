@@ -21,6 +21,9 @@ pub const SILENT: Duration = Duration::from_millis(500);
 /// reaching it.
 pub const NEVER: Duration = Duration::from_secs(3);
 
+/// A refusal this recent, with no answer since, is why nothing answers.
+const REFUSED_FOR: Duration = Duration::from_secs(2);
+
 /// Loss is the change in the duck's `accepted` count over the change in sends, over this window.
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
 
@@ -39,6 +42,8 @@ pub enum State {
     Silent(Duration),
     /// Sends went out for [`NEVER`] and nothing ever answered.
     NeverAnswered,
+    /// No answer, and the duck's address said nothing listens on the port.
+    Refused,
 }
 
 impl State {
@@ -60,6 +65,7 @@ pub struct Link {
     latest: Option<Status>,
     /// `stale` at the first answer: the count shown is this sender's, not the duck's lifetime.
     stale_base: Option<u32>,
+    refused: Option<Instant>,
 }
 
 impl Default for Link {
@@ -74,6 +80,7 @@ impl Default for Link {
             loss: None,
             latest: None,
             stale_base: None,
+            refused: None,
         }
     }
 }
@@ -91,6 +98,11 @@ impl Link {
         self.last = None;
         self.window = None;
         self.loss = None;
+    }
+
+    /// The ICMP "port unreachable" a connected socket reports, on a send or a receive.
+    pub fn on_refused(&mut self, at: Instant) {
+        self.refused = Some(at);
     }
 
     pub fn on_status(&mut self, s: Status, at: Instant) {
@@ -131,6 +143,13 @@ impl Link {
     }
 
     pub fn state(&self, now: Instant) -> State {
+        let refused = self.refused.is_some_and(|at| {
+            now.saturating_duration_since(at) < REFUSED_FOR
+                && self.last.is_none_or(|(answered, _)| answered < at)
+        });
+        if refused {
+            return State::Refused;
+        }
         match self.last {
             Some((at, verdict)) => {
                 let quiet = now.saturating_duration_since(at);
@@ -239,6 +258,14 @@ mod tests {
         assert_eq!(l.loss(), None, "not driving, so no loss to speak of");
         assert!(matches!(l.state(ms(3_600)), State::Silent(_)));
         assert!(State::Silent(SILENT).same_kind(State::Silent(NEVER)));
+        l.on_refused(ms(3_700));
+        assert_eq!(l.state(ms(3_800)), State::Refused);
+        l.on_status(status(Verdict::Driving, 0, 1), ms(3_900));
+        assert_eq!(
+            l.state(ms(3_901)),
+            State::Driving,
+            "an answer since outranks it"
+        );
         // No pad on this machine: the silence is ours, and starts over.
         l.paused();
         assert_eq!(l.state(ms(9_000)), State::Waiting);

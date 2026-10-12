@@ -56,8 +56,7 @@ impl Pacer {
 }
 
 /// A failing send that has been clean this long is fixed, and the next failure is news again.
-/// Longer than the gap between failures when nothing listens: a connected UDP socket reports the
-/// ICMP refusal on the send after the one that caused it, so failures alternate with successes.
+/// Long enough that a flapping route is one notice, not one per flap.
 const RECOVERED: Duration = Duration::from_secs(2);
 
 /// What is worth a line on stderr, said once per change rather than once per packet: at 30 Hz a
@@ -99,19 +98,15 @@ impl Notices {
         now: Instant,
     ) -> Option<String> {
         match result {
+            // No duck to connect to is the link's to say (`Notices::link`), not a send failure.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => None,
             Err(e) => {
                 self.last_failure = Some(now);
                 if self.failing == Some(e.kind()) {
                     return None;
                 }
                 self.failing = Some(e.kind());
-                Some(match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused => format!(
-                        "nothing listening on {to} — is [netpad] enabled on the duck? \
-                         (docs/robot/udp-pad.md); still trying"
-                    ),
-                    _ => format!("cannot send to {to}: {e}; still trying"),
-                })
+                Some(format!("cannot send to {to}: {e}; still trying"))
             }
             Ok(_) => {
                 let fixed = self.failing.is_some()
@@ -129,27 +124,15 @@ impl Notices {
 }
 
 impl Notices {
-    /// The duck's answers, once per change of kind.
-    pub fn link(&mut self, state: State) -> Option<String> {
+    /// Whether the duck is connected, once per change of kind. Led by the same verdict the
+    /// panel shows, so a scrolled-back log reads the same as the screen.
+    pub fn link(&mut self, to: &str, state: State) -> Option<String> {
         if self.link.is_some_and(|was| was.same_kind(state)) {
             return None;
         }
         self.link = Some(state);
-        match state {
-            State::Waiting => None,
-            State::Driving => Some("the duck answers — driving".to_owned()),
-            State::Busy => Some(
-                "another client is driving the duck — this one is ignored until that one has \
-                 been quiet for [netpad] timeout_ms"
-                    .to_owned(),
-            ),
-            State::Silent(_) => Some("no answer from the duck — still sending".to_owned()),
-            State::NeverAnswered => Some(
-                "no answer from netpadd: it may predate answers (driving still works, the \
-                 duck line stays blank), or nothing reaches it"
-                    .to_owned(),
-            ),
-        }
+        let (verdict, why) = panel::verdict(to, state)?;
+        Some(format!("{} — {why}", verdict.word()))
     }
 }
 
@@ -184,6 +167,9 @@ const GILRS: [(Button, Buttons); 13] = [
 /// How often the pad is read. Faster than any `hz` worth sending, so a change is seen within a
 /// millisecond and the cap, not the polling, is what decides when it goes.
 const POLL: Duration = Duration::from_millis(1);
+
+/// How long after start a missing pad is taken to be missing — see `run`.
+const PAD_SETTLE: Duration = Duration::from_secs(1);
 
 /// One second's sends, counted.
 #[derive(Default)]
@@ -283,6 +269,9 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
         while let Ok(heard) = answers.try_recv() {
             match heard {
                 Heard::Status(s, at) => link.on_status(s, at),
+                Heard::Failed(std::io::ErrorKind::ConnectionRefused) => {
+                    link.on_refused(Instant::now());
+                }
                 Heard::Failed(kind) => {
                     if let Some(line) = notices.sent(&to, &Err(kind.into()), Instant::now()) {
                         say(&mut screen, line);
@@ -291,11 +280,16 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
             }
         }
         let pad = gilrs.gamepads().next();
-        if let Some(line) = notices.pad(pad.as_ref().map(|(_, p)| p.name())) {
+        let now = Instant::now();
+        // gilrs on macOS finds a pad already plugged in through an event a moment after start:
+        // "no gamepad" before then would be wrong, and said only to be taken back.
+        let settled = now.duration_since(started) >= PAD_SETTLE;
+        if (pad.is_some() || settled)
+            && let Some(line) = notices.pad(pad.as_ref().map(|(_, p)| p.name()))
+        {
             say(&mut screen, line);
         }
-        let now = Instant::now();
-        if let Some(line) = notices.link(link.state(now)) {
+        if let Some(line) = notices.link(&to, link.state(now)) {
             say(&mut screen, line);
         }
 
@@ -337,7 +331,12 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                         link.on_sent(seq, now);
                         sent_now = true;
                     }
-                    Err(_) => failed += 1,
+                    Err(e) => {
+                        failed += 1;
+                        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                            link.on_refused(now);
+                        }
+                    }
                 }
                 if let Some(line) = notices.sent(&to, &result, now) {
                     say(&mut screen, line);
@@ -355,6 +354,7 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
             shown = Some(now);
             let view = View {
                 to: &to,
+                searching: !settled,
                 pad: pad.as_ref().map(|(id, p)| panel::Pad {
                     name: p.name(),
                     power: power(p.power_info()),
@@ -370,7 +370,10 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 now,
             };
             match &mut screen {
-                Some(s) => s.draw(&panel::lines(&view)),
+                Some(s) => {
+                    let (verdict, lines) = panel::lines(&view);
+                    s.draw(verdict, &lines);
+                }
                 None => eprintln!("{}", panel::summary(&view)),
             }
         }
@@ -411,19 +414,19 @@ mod tests {
         use std::io::{Error, ErrorKind};
         let (t, to) = (Instant::now(), "duck.local:4210");
         let at = |ms: u64| t + Duration::from_millis(ms);
-        let refused = || Err(Error::from(ErrorKind::ConnectionRefused));
+        let down = || Err(Error::from(ErrorKind::HostUnreachable));
         let mut n = Notices::default();
 
+        // Nothing listening is the link's to say, as NOT CONNECTED.
+        let refused = Err(Error::from(ErrorKind::ConnectionRefused));
+        assert_eq!(n.sent(to, &refused, at(0)), None);
+
         assert_eq!(n.sent(to, &Ok(28), at(0)), None);
-        let first = n.sent(to, &refused(), at(33)).expect("said");
-        assert!(
-            first.contains("nothing listening on duck.local:4210"),
-            "{first}"
-        );
-        assert!(first.contains("[netpad] enabled"), "{first}");
-        // The ICMP answer lands on every other send: alternating, and silent.
+        let first = n.sent(to, &down(), at(33)).expect("said");
+        assert!(first.contains("cannot send to duck.local:4210"), "{first}");
+        // A flapping route: alternating, and silent.
         for i in 2..60 {
-            let r = if i % 2 == 0 { Ok(28) } else { refused() };
+            let r = if i % 2 == 0 { Ok(28) } else { down() };
             assert_eq!(n.sent(to, &r, at(33 * i)), None, "send {i}");
         }
         let other = n.sent(
@@ -440,7 +443,7 @@ mod tests {
                 .is_some_and(|m| m.contains("again"))
         );
         assert_eq!(n.sent(to, &Ok(28), at(4_033)), None);
-        assert!(n.sent(to, &refused(), at(5_000)).is_some());
+        assert!(n.sent(to, &down(), at(5_000)).is_some());
     }
 
     /// The pad on this machine: said when it is first looked for, and on every change after.
@@ -461,21 +464,29 @@ mod tests {
     /// The duck's answers: said when they start, change kind, or stop — not as a silence grows.
     #[test]
     fn the_link_is_said_once_per_change_of_kind() {
-        let mut n = Notices::default();
-        assert_eq!(n.link(State::Waiting), None);
+        let (mut n, to) = (Notices::default(), "duck.local:4210");
+        assert_eq!(n.link(to, State::Waiting), None);
         assert!(
-            n.link(State::Driving)
-                .is_some_and(|m| m.contains("driving"))
+            n.link(to, State::Refused)
+                .is_some_and(|m| m.starts_with("✕ NOT CONNECTED") && m.contains("listening"))
         );
-        assert_eq!(n.link(State::Driving), None);
         assert!(
-            n.link(State::Silent(link::SILENT))
-                .is_some_and(|m| m.contains("no answer"))
+            n.link(to, State::Driving)
+                .is_some_and(|m| m.starts_with("● CONNECTED"))
         );
-        assert_eq!(n.link(State::Silent(link::NEVER)), None, "a longer silence");
+        assert_eq!(n.link(to, State::Driving), None);
         assert!(
-            n.link(State::Busy)
-                .is_some_and(|m| m.contains("another client"))
+            n.link(to, State::Silent(link::SILENT))
+                .is_some_and(|m| m.starts_with("✕ NOT CONNECTED"))
+        );
+        assert_eq!(
+            n.link(to, State::Silent(link::NEVER)),
+            None,
+            "a longer silence"
+        );
+        assert!(
+            n.link(to, State::Busy)
+                .is_some_and(|m| m.starts_with("◐ NOT DRIVING"))
         );
     }
 

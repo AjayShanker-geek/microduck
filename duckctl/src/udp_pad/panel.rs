@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use crossterm::style::{Color, Stylize};
 use crossterm::{cursor, queue, terminal};
 use pad_map::Buttons;
 use pad_map::wire::Packet;
@@ -45,6 +46,8 @@ pub struct Pad<'a> {
 pub struct View<'a> {
     pub to: &'a str,
     pub pad: Option<Pad<'a>>,
+    /// No pad yet, and too early to say there is none.
+    pub searching: bool,
     pub hz: u32,
     /// Sends in the last second.
     pub rate: Option<u32>,
@@ -74,41 +77,97 @@ fn ms(d: Duration) -> String {
     }
 }
 
-fn robot(v: &View) -> String {
-    let l = v.link;
-    let figures = || {
-        let mut f = Vec::new();
-        if let Some(rtt) = l.rtt() {
-            f.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1e3));
+/// Whether this laptop reaches the duck, in one word — the first thing the block says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Connected,
+    /// Connected, but another client holds the robot.
+    NotDriving,
+    NotConnected,
+    /// Nothing to say yet: no pad, or the first answer not due.
+    Pending,
+}
+
+impl Verdict {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Connected => "● CONNECTED",
+            Self::NotDriving => "◐ NOT DRIVING",
+            Self::NotConnected => "✕ NOT CONNECTED",
+            Self::Pending => "… connecting",
         }
-        if let Some(loss) = l.loss() {
-            f.push(format!("loss {:.1}%", loss * 100.0));
-        }
-        if let Some(stale) = l.stale().filter(|n| *n > 0) {
-            f.push(format!("{stale} stale"));
-        }
-        if let Some(bad) = l.malformed().filter(|n| *n > 0) {
-            f.push(format!("{bad} malformed on its port"));
-        }
-        f.iter().map(|s| format!(" · {s}")).collect::<String>()
-    };
-    match l.state(v.now) {
-        State::Waiting if v.pad.is_none() => "idle — nothing sent without a pad".to_owned(),
-        State::Waiting => "waiting for an answer".to_owned(),
-        State::Driving => format!("driving{}", figures()),
-        State::Busy => {
-            "another client is driving it — ignored until that one goes quiet".to_owned()
-        }
-        State::Silent(d) => format!("no answer for {}", ms(d)),
-        State::NeverAnswered => {
-            "never answered — netpadd too old for answers, or unreachable".to_owned()
+    }
+
+    fn color(self) -> Option<Color> {
+        match self {
+            Self::Connected => Some(Color::Green),
+            Self::NotDriving => Some(Color::Yellow),
+            Self::NotConnected => Some(Color::Red),
+            Self::Pending => None,
         }
     }
 }
 
-/// The block, one string per line.
-pub fn lines(v: &View) -> [String; 4] {
+/// The verdict on the link and why, `None` while there is nothing to say — no notice then.
+pub fn verdict(to: &str, state: State) -> Option<(Verdict, String)> {
+    Some(match state {
+        State::Waiting => return None,
+        State::Driving => (Verdict::Connected, "driving the duck".to_owned()),
+        State::Busy => (
+            Verdict::NotDriving,
+            "another client holds the duck; this one is ignored until it has been quiet for \
+             [netpad] timeout_ms"
+                .to_owned(),
+        ),
+        State::Silent(d) => (
+            Verdict::NotConnected,
+            format!("the duck stopped answering {} ago; still sending", ms(d)),
+        ),
+        State::NeverAnswered => (
+            Verdict::NotConnected,
+            format!("nothing answers from {to} — is netpadd running, and up to date?"),
+        ),
+        State::Refused => (
+            Verdict::NotConnected,
+            format!("nothing listening on {to} — is [netpad] enabled on the duck?"),
+        ),
+    })
+}
+
+fn robot(v: &View) -> (Verdict, String) {
+    let l = v.link;
+    let state = l.state(v.now);
+    let Some((verdict, why)) = verdict(v.to, state) else {
+        let why = if v.pad.is_none() {
+            "nothing is sent without a pad"
+        } else {
+            "waiting for the duck's first answer"
+        };
+        return (Verdict::Pending, why.to_owned());
+    };
+    if state != State::Driving {
+        return (verdict, why);
+    }
+    let mut f = Vec::new();
+    if let Some(rtt) = l.rtt() {
+        f.push(format!("rtt {:.1} ms", rtt.as_secs_f64() * 1e3));
+    }
+    if let Some(loss) = l.loss() {
+        f.push(format!("loss {:.1}%", loss * 100.0));
+    }
+    if let Some(stale) = l.stale().filter(|n| *n > 0) {
+        f.push(format!("{stale} stale"));
+    }
+    if let Some(bad) = l.malformed().filter(|n| *n > 0) {
+        f.push(format!("{bad} malformed on its port"));
+    }
+    (verdict, f.join(" · "))
+}
+
+/// The block: the duck's verdict first, then one string per line.
+pub fn lines(v: &View) -> (Verdict, [String; 4]) {
     let (pad, input) = match &v.pad {
+        None if v.searching => ("looking for one…".to_owned(), "—".to_owned()),
         None => ("none — plug one in".to_owned(), "—".to_owned()),
         Some(p) => {
             let mut pad = p.name.to_owned();
@@ -133,22 +192,26 @@ pub fn lines(v: &View) -> [String; 4] {
         }
     };
     let rate = v.rate.map_or("—".to_owned(), |r| r.to_string());
-    [
-        format!("pad    {pad}"),
-        format!("input  {input}"),
-        format!(
-            "send   {rate} Hz of {} → {} · {} failed",
-            v.hz, v.to, v.failed
-        ),
-        format!("duck   {}", robot(v)),
-    ]
+    let (verdict, why) = robot(v);
+    (
+        verdict,
+        [
+            format!("duck   {} {why}", verdict.word()),
+            format!("pad    {pad}"),
+            format!("input  {input}"),
+            format!(
+                "send   {rate} Hz of {} → {} · {} failed",
+                v.hz, v.to, v.failed
+            ),
+        ],
+    )
 }
 
 /// One line for a log: the same facts, flattened.
 pub fn summary(v: &View) -> String {
-    let [pad, _, send, duck] = lines(v);
+    let (_, [duck, pad, _, send]) = lines(v);
     let squash = |s: String| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{} | {} | {}", squash(pad), squash(send), squash(duck))
+    format!("{} | {} | {}", squash(duck), squash(pad), squash(send))
 }
 
 /// The block on a terminal, under whatever notices have been printed.
@@ -181,14 +244,22 @@ impl Screen {
         let _ = err.flush();
     }
 
-    pub fn draw(&mut self, lines: &[String]) {
+    /// The block, its first line — the verdict — in the verdict's colour, bold.
+    pub fn draw(&mut self, verdict: Verdict, lines: &[String]) {
         let mut err = std::io::stderr().lock();
         let _ = self.clear(&mut err);
         let width = terminal::size().map_or(usize::MAX, |(w, _)| usize::from(w.max(1)));
-        for line in lines {
+        for (i, line) in lines.iter().enumerate() {
             // Cut, not wrapped: a wrapped line would throw the count off, and the redraw with it.
             let cut: String = line.chars().take(width.saturating_sub(1)).collect();
-            let _ = writeln!(err, "{cut}");
+            match verdict.color().filter(|_| i == 0) {
+                Some(c) => {
+                    let _ = writeln!(err, "{}", cut.with(c).bold());
+                }
+                None => {
+                    let _ = writeln!(err, "{cut}");
+                }
+            }
         }
         self.drawn = lines.len() as u16;
         let _ = err.flush();
@@ -198,6 +269,31 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every state that is not driving this robot says NOT, and says why.
+    #[test]
+    fn not_connected_is_said_as_such_with_the_reason() {
+        let to = "duck.local:4210";
+        let v = |s| verdict(to, s).unwrap();
+        assert_eq!(v(State::Driving).0, Verdict::Connected);
+        assert_eq!(v(State::Busy).0, Verdict::NotDriving);
+        for s in [
+            State::Silent(Duration::from_secs(2)),
+            State::NeverAnswered,
+            State::Refused,
+        ] {
+            let (verdict, why) = v(s);
+            assert_eq!(verdict, Verdict::NotConnected, "{s:?}");
+            assert!(verdict.word().contains("NOT CONNECTED"));
+            assert!(!why.is_empty());
+        }
+        assert!(
+            v(State::Refused)
+                .1
+                .contains("nothing listening on duck.local:4210")
+        );
+        assert_eq!(verdict(to, State::Waiting), None);
+    }
 
     #[test]
     fn held_buttons_are_named_in_wire_order() {
@@ -217,13 +313,15 @@ mod tests {
                 last_input: Some(Duration::from_millis(12)),
                 packet,
             }),
+            searching: false,
             hz: 30,
             rate: Some(30),
             failed: 0,
             link: &link,
             now: Instant::now(),
         };
-        let [pad, input, send, duck] = lines(&v);
+        let (verdict, [duck, pad, input, send]) = lines(&v);
+        assert_eq!(verdict, Verdict::Pending);
         assert!(
             pad.contains("Xbox") && pad.contains("70%") && pad.contains("12 ms"),
             "{pad}"
@@ -234,6 +332,7 @@ mod tests {
         );
         assert!(send.contains("30 Hz of 30"), "{send}");
         assert!(duck.contains("waiting"), "{duck}");
+        assert!(summary(&v).starts_with("duck"), "the verdict leads");
         assert!(!summary(&v).contains('\n'));
     }
 }
