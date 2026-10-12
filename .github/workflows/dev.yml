@@ -33,7 +33,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish:
+  daemon:
     # Not in a fork. A contributor's push runs this in their fork, where the dev key does not
     # exist, so every run ended red at the signing step — a failure that says nothing about the
     # change and hides one that does. `ci.yml` on the pull request is what checks their work.
@@ -42,6 +42,9 @@ jobs:
     # only, so the dev key is empty, and a version bump is nothing anyone installs on a board.
     if: ${{ !github.event.repository.fork && github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -225,6 +228,97 @@ jobs:
           cargo run -p xtask -- sign --dir dist --key "$RUNNER_TEMP/dev.key"
           shred -u "$RUNNER_TEMP/dev.key" 2>/dev/null || rm -f "$RUNNER_TEMP/dev.key"
 
+      # Handed to `publish`, which waits for the `duckctl` builds too before the release exists.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # `duckctl`, the laptop-side tool, for the machines people reach a duck from, so a branch's client
+  # is a download (`scripts/install-duckctl.sh <branch>`) rather than a Rust toolchain. Published on
+  # the same release as the daemon: the updater fetches assets by exact name
+  # (`updater/src/source/github.rs`), so these sit beside the board's files without being seen.
+  #
+  # A tarball per Unix platform so the executable bit survives; a zip for Windows, which
+  # PowerShell's `Expand-Archive` reads. Linux is built on ubuntu-latest, so it needs that image's
+  # glibc or newer. The macOS binaries are unsigned: fetched with curl they run, fetched by a
+  # browser they are quarantined.
+  duckctl:
+    if: ${{ !github.event.repository.fork && github.actor != 'dependabot[bot]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-arm64
+            runs-on: macos-latest
+            target: aarch64-apple-darwin
+          # Cross-compiled from the arm64 runner: the Xcode SDK carries both architectures.
+          - name: macos-x86_64
+            runs-on: macos-latest
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        # Git Bash on Windows, so every step below is the same line everywhere.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: duckctl-${{ matrix.target }}
+
+      # btleplug talks to BlueZ through libdbus, and gilrs reads pads through libudev.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - run: cargo build --release --locked -p duckctl --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir dist
+          cd target/${{ matrix.target }}/release
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a "$GITHUB_WORKSPACE/dist/duckctl-${{ matrix.name }}.zip" duckctl.exe
+          else
+            tar -czf "$GITHUB_WORKSPACE/dist/duckctl-${{ matrix.name }}.tar.gz" duckctl
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: duckctl-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # One release per branch, created once everything is built: the delete-then-create below would
+  # otherwise race a separate upload away. Only the daemon is required. A `duckctl` build that
+  # fails leaves its file out and the run red, but never holds back the build boards install.
+  publish:
+    needs: [daemon, duckctl]
+    if: ${{ !cancelled() && needs.daemon.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       # The tag moves; the version inside never repeats. That is what makes `--ref` mean
       # "whatever this branch last built" while every build stays individually addressable by
       # `--version`.
@@ -235,14 +329,15 @@ jobs:
       - name: Publish the moving per-branch prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          tag="${{ steps.v.outputs.tag }}"
+          tag="${{ needs.daemon.outputs.tag }}"
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
 
           gh release create "$tag" \
             --prerelease \
             --target "${GITHUB_SHA}" \
-            --title "daemon ${{ steps.v.outputs.version }} (${GITHUB_REF_NAME})" \
+            --title "daemon ${{ needs.daemon.outputs.version }} (${GITHUB_REF_NAME})" \
             --notes "Dev build of \`${GITHUB_REF_NAME}\` at \`${GITHUB_SHA}\`.
 
           Install on a **dev board**:
@@ -254,6 +349,14 @@ jobs:
           Signed with \`team.dev\`, so a customer robot refuses it. The board needs
           \`team.dev.pub\` in its trusted keys and \`allow_dev_keys = true\` — see
           docs/deploy.md.
+
+          \`duckctl\` from this branch, on Linux or macOS:
+
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install-duckctl.sh | sh -s -- ${GITHUB_REF_NAME}
+          \`\`\`
+
+          On Windows, \`duckctl-windows-x86_64.zip\` below — docs/robot/duckctl.md has the steps.
 
           This tag moves on every push to the branch; the version inside does not.
           " \
