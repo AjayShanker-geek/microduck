@@ -3,6 +3,9 @@
 //!
 //! Every datagram is the pad's *whole* state, never a delta, so a lost one costs nothing — the
 //! next replaces it — and nothing ever has to be retransmitted or reordered.
+//!
+//! [`Status`] is the answer `netpadd` sends back, so a sender can see the link: which datagram it
+//! answers, and the receiver's running counts. A sender may ignore it entirely.
 
 use crate::{Buttons, PadFrame};
 
@@ -131,9 +134,117 @@ impl Packet {
     }
 }
 
+pub const STATUS_MAGIC: [u8; 4] = *b"DKST";
+pub const STATUS_VERSION: u8 = 1;
+/// No longer than a pad datagram, so an answer never amplifies what it answers.
+pub const STATUS_LEN: usize = 24;
+const _: () = assert!(STATUS_LEN <= LEN, "an answer must never outgrow what it answers");
+
+/// What became of the datagram a [`Status`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// From the client that holds the robot — taken, or dropped as stale.
+    Driving,
+    /// Another client holds the robot; this one is dropped until it has been quiet `timeout_ms`.
+    Busy,
+    /// A code this build does not know, kept so a reader can say so.
+    Other(u8),
+}
+
+impl Verdict {
+    fn code(self) -> u8 {
+        match self {
+            Self::Driving => 1,
+            Self::Busy => 2,
+            Self::Other(c) => c,
+        }
+    }
+
+    fn from_code(c: u8) -> Self {
+        match c {
+            1 => Self::Driving,
+            2 => Self::Busy,
+            c => Self::Other(c),
+        }
+    }
+}
+
+/// `netpadd`'s answer to one pad datagram. The counters are the receiver's own, wrapping, since it
+/// started: a sender reads their change, never their value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    pub verdict: Verdict,
+    /// The `seq` of the datagram answered.
+    pub seq: u32,
+    /// Datagrams taken from the driving client.
+    pub accepted: u32,
+    /// Datagrams from the driving client dropped as not newer.
+    pub stale: u32,
+    /// Datagrams that were not pad state at all, from anyone.
+    pub malformed: u32,
+}
+
+impl Status {
+    pub fn encode(&self) -> [u8; STATUS_LEN] {
+        let mut b = [0u8; STATUS_LEN];
+        b[..4].copy_from_slice(&STATUS_MAGIC);
+        b[4] = STATUS_VERSION;
+        b[5] = self.verdict.code();
+        b[6..10].copy_from_slice(&self.seq.to_le_bytes());
+        b[10..14].copy_from_slice(&self.accepted.to_le_bytes());
+        b[14..18].copy_from_slice(&self.stale.to_le_bytes());
+        b[18..22].copy_from_slice(&self.malformed.to_le_bytes());
+        b
+    }
+
+    /// Longer than [`STATUS_LEN`] is fine, as for [`Packet::decode`].
+    pub fn decode(b: &[u8]) -> Result<Self, WireError> {
+        if b.len() < STATUS_LEN {
+            return Err(WireError::Short(b.len()));
+        }
+        if b[..4] != STATUS_MAGIC {
+            return Err(WireError::Magic);
+        }
+        if b[4] != STATUS_VERSION {
+            return Err(WireError::Version(b[4]));
+        }
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        Ok(Self {
+            verdict: Verdict::from_code(b[5]),
+            seq: u32_at(6),
+            accepted: u32_at(10),
+            stale: u32_at(14),
+            malformed: u32_at(18),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_status_round_trips() {
+        let s = Status {
+            verdict: Verdict::Busy,
+            seq: 0xDEAD_BEEF,
+            accepted: 7,
+            stale: 2,
+            malformed: 1,
+        };
+        let b = s.encode();
+        assert_eq!(&b[..4], b"DKST");
+        assert_eq!(b[5], 2);
+        assert_eq!(Status::decode(&b), Ok(s));
+        assert_eq!(
+            Status::decode(&Packet::default().encode()),
+            Err(WireError::Magic),
+            "a pad datagram is not a status"
+        );
+        let mut odd = b;
+        odd[5] = 9;
+        assert_eq!(Status::decode(&odd).unwrap().verdict, Verdict::Other(9));
+    }
 
     fn sample() -> Packet {
         Packet {

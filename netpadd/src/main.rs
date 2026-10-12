@@ -172,6 +172,7 @@ async fn serve(
         .and_then(|m| m.modified())
         .ok();
     let (mut malformed, mut malformed_logged) = (0u64, None::<Instant>);
+    let mut answers = Answers::default();
     let mut reserved_logged = false;
     // A client that was driving and went quiet: the robot sits after a second — `pad_map::loss`,
     // the same as `padd` does for a Bluetooth pad.
@@ -190,7 +191,13 @@ async fn serve(
                 let mut next = got.ok();
                 while let Some((n, from)) = next {
                     let now = Instant::now();
-                    match rx.on_datagram(now, from, &buf[..n]) {
+                    let accept = rx.on_datagram(now, from, &buf[..n]);
+                    if let Some(status) = answers.on(accept, &buf[..n], malformed, now) {
+                        // Best effort and never awaited: a full buffer or an unreachable client
+                        // drops the answer, never delays the next datagram or ends the loop.
+                        let _ = socket.try_send_to(&status.encode(), from);
+                    }
+                    match accept {
                         Accept::Connected => {
                             tracing::warn!(%from, "pad client connected — driving");
                             // What it holds was pressed before we saw it. `Gone` already spent a
@@ -303,6 +310,61 @@ async fn serve(
                 }
             }
         }
+    }
+}
+
+/// A sender that is not the driving one hears "busy" at most this often: it learns why it is
+/// ignored without the robot answering every datagram of a client it is not listening to.
+const BUSY_ANSWER: Duration = Duration::from_secs(1);
+
+/// The answer to each datagram — `pad_map::wire::Status`, which `udp-pad.md` documents. Nothing
+/// for a malformed one: whatever sent it is not a pad client.
+#[derive(Default)]
+struct Answers {
+    accepted: u32,
+    stale: u32,
+    busy_answered: Option<Instant>,
+}
+
+impl Answers {
+    fn on(
+        &mut self,
+        accept: Accept,
+        bytes: &[u8],
+        malformed: u64,
+        now: Instant,
+    ) -> Option<pad_map::wire::Status> {
+        use pad_map::wire::Verdict;
+        let verdict = match accept {
+            Accept::Connected | Accept::Taken => {
+                self.accepted = self.accepted.wrapping_add(1);
+                Verdict::Driving
+            }
+            Accept::Stale => {
+                self.stale = self.stale.wrapping_add(1);
+                Verdict::Driving
+            }
+            Accept::OtherPeer => {
+                if self
+                    .busy_answered
+                    .is_some_and(|at| now.duration_since(at) < BUSY_ANSWER)
+                {
+                    return None;
+                }
+                self.busy_answered = Some(now);
+                Verdict::Busy
+            }
+            Accept::Malformed(_) => return None,
+        };
+        // Decoded already by the receiver; only the seq is read again.
+        let seq = pad_map::wire::Packet::decode(bytes).ok()?.seq;
+        Some(pad_map::wire::Status {
+            verdict,
+            seq,
+            accepted: self.accepted,
+            stale: self.stale,
+            malformed: malformed as u32,
+        })
     }
 }
 
@@ -462,6 +524,44 @@ mod tests {
         std::iter::from_fn(|| seen.try_recv().ok())
             .filter(|(m, _)| m != "robot.mode")
             .collect()
+    }
+
+    async fn answer(sock: &tokio::net::UdpSocket) -> Option<pad_map::wire::Status> {
+        let mut b = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(1), sock.recv(&mut b))
+            .await
+            .ok()?
+            .ok()?;
+        pad_map::wire::Status::decode(&b[..n]).ok()
+    }
+
+    /// Each datagram from the driving client is answered with its seq; a second sender hears
+    /// it is locked out, once a second rather than once a datagram.
+    #[tokio::test]
+    async fn the_driver_hears_each_seq_and_another_sender_hears_busy_once_a_second() {
+        use pad_map::wire::Verdict;
+        let (_dir, _seen, serving, client) = start().await;
+        for seq in [10, 11, 12] {
+            let p = Packet::from_axes(seq, 0, [0.0; 4], [0.0, 0.0], pad_map::Buttons::NONE);
+            client.send(&p.encode()).await.unwrap();
+            let s = answer(&client).await.expect("an answer");
+            assert_eq!((s.verdict, s.seq), (Verdict::Driving, seq));
+        }
+        let p = Packet::from_axes(11, 0, [0.0; 4], [0.0, 0.0], pad_map::Buttons::NONE);
+        client.send(&p.encode()).await.unwrap();
+        let s = answer(&client).await.expect("a stale one is answered too");
+        assert_eq!((s.accepted, s.stale), (3, 1));
+
+        let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        other.connect(client.peer_addr().unwrap()).await.unwrap();
+        for seq in 0..3 {
+            let p = Packet::from_axes(seq, 0, [0.0; 4], [0.0, 0.0], pad_map::Buttons::NONE);
+            other.send(&p.encode()).await.unwrap();
+        }
+        let s = answer(&other).await.expect("busy");
+        assert_eq!(s.verdict, Verdict::Busy);
+        assert_eq!(answer(&other).await, None, "once a second");
+        assert!(!serving.is_finished());
     }
 
     /// The first client after `netpadd` starts — at every update and every `robotctl configure`
