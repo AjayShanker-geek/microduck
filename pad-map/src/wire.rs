@@ -20,7 +20,8 @@ const FULL: f64 = 32767.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Packet {
-    /// +1 per datagram, wrapping. The receiver drops anything not newer than what it has.
+    /// +1 per datagram, wrapping. The receiver drops anything not newer than what it has, or
+    /// more than 1000 ahead of it.
     pub seq: u32,
     /// The sender's own clock, ms. For jitter in logs only; never compared with the robot's.
     pub t_ms: u32,
@@ -187,7 +188,7 @@ pub struct Status {
     pub seq: u32,
     /// Datagrams taken from the driving client.
     pub accepted: u32,
-    /// Datagrams from the driving client dropped as not newer.
+    /// Datagrams from the driving client dropped as not newer, or too far ahead.
     pub stale: u32,
     /// Datagrams that were not pad state at all, from anyone.
     pub malformed: u32,

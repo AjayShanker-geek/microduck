@@ -182,7 +182,8 @@ The rules a sender follows, and why:
 - **Send the whole state every time.** Nothing is retransmitted and nothing is queued, so a lost
   datagram must cost nothing — which it does only if the next one says everything.
 - **Start `seq` at a random value and add 1 per datagram.** The robot drops a datagram that is not
-  newer than the last, which is how a reordered one never moves the robot backwards. A random start
+  newer than the last, which is how a reordered one never moves the robot backwards, and one more
+  than 1000 ahead of it, so a sender must never skip ahead. A random start
   means a restarted sender is not mistaken for a stale one.
 - **Send on change, plus a keepalive every `1/hz`.** The change is what makes it feel immediate; the
   keepalive is what tells the robot you are still there.
@@ -204,7 +205,7 @@ the robot waits for them to be read.
 | 5 | 1 | verdict | `1` driving: this client holds the robot. `2` busy: another client does |
 | 6 | 4 | seq | u32, the `seq` of the datagram answered |
 | 10 | 4 | accepted | u32, datagrams taken from the client holding the robot |
-| 14 | 4 | stale | u32, datagrams from that client dropped as not newer |
+| 14 | 4 | stale | u32, datagrams from that client dropped as not newer, or more than 1000 ahead |
 | 18 | 4 | malformed | u32, datagrams on the port that were not pad state, from anyone |
 | 22 | 2 | reserved | `0` |
 
@@ -247,8 +248,8 @@ added to `robot.health` reaches this report without a change to the format.
   press and release that both land between two slots still fire, because buttons are compared per
   datagram, not per slot.
 - **The first sender holds it.** The robot locks to the address of the first datagram it accepts and
-  drops datagrams from any other address until that one has been silent for `timeout_ms`. Two
-  people cannot fight over one duck.
+  drops datagrams from any other address until that one has been silent for `timeout_ms`, so two
+  people driving honestly cannot fight over one duck. It is not protection: see [trust](#trust).
 - **Silence is the client gone.** After `timeout_ms` with nothing accepted, `netpadd` sends no more
   stick commands, and `robotd`'s deadman (`[safety] deadman_ms`) stops the walking. In-flight holds
   are reset and the lock is released. Then it does what `padd` does when a Bluetooth pad drops
@@ -274,7 +275,10 @@ Exactly one of `padd` and `netpadd` runs because each asks the same configuratio
 ## Trust
 
 There is none. Anyone on the LAN who can reach UDP port 4210 can drive the robot once the current
-client has been quiet for `timeout_ms`, and while a client is talking the first sender's address is
-the only thing that keeps others out — an address on a LAN is not a secret. Use it on a network you
+client has been quiet for `timeout_ms` — including holding Select to power it off. While a client
+is talking, its address is the only thing that keeps others out, and a source address on a LAN can
+be forged: a datagram carrying the driver's address and a `seq` just ahead of theirs is taken as
+theirs. The 1000-ahead bound stops a single blind forgery from locking the driver out, not someone
+who can see the traffic. Use it on a network you
 would let into the room with the robot, and for anything beyond that use
 [WebRTC](../design/remote-webrtc.md).

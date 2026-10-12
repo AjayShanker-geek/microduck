@@ -11,6 +11,12 @@ use std::time::{Duration, Instant};
 use pad_map::wire::{Packet, WireError};
 use pad_map::{Buttons, PadFrame};
 
+/// How far ahead of the last accepted `seq` a datagram may be and still count as newer. A client
+/// sends at most 100 a second and is gone after `timeout_ms` of silence, so an honest one never
+/// gets near it; without it, one forged datagram far ahead would read every real one as stale and
+/// hand the robot to whoever forged it.
+pub const MAX_SEQ_AHEAD: u32 = 1000;
+
 /// Assumes `min_interval <= fallback`, which `[netpad] max_hz >= 10` guarantees in robotd-params.
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -27,7 +33,7 @@ pub enum Accept {
     /// Accepted, and it is the first since the client was last gone.
     Connected,
     Taken,
-    /// Not newer than what is held.
+    /// Not newer than what is held, or further ahead than [`MAX_SEQ_AHEAD`].
     Stale,
     /// Another sender holds the lock.
     OtherPeer,
@@ -83,8 +89,9 @@ impl Receiver {
         let connected = match self.peer {
             Some(peer) if peer != from => return Accept::OtherPeer,
             Some(_) => {
-                // Newer, in wrapping order: within half the sequence space ahead.
-                if (packet.seq.wrapping_sub(self.latest.seq) as i32) <= 0 {
+                // Newer, in wrapping order, and not implausibly so.
+                let ahead = packet.seq.wrapping_sub(self.latest.seq);
+                if ahead == 0 || ahead > MAX_SEQ_AHEAD {
                     return Accept::Stale;
                 }
                 let (now_held, before) = (packet.held(), self.latest.held());
@@ -257,6 +264,28 @@ mod tests {
         assert_eq!(
             r.on_datagram(t, addr(A), &pkt(u32::MAX, Buttons::NONE, 0.0)),
             Accept::Stale
+        );
+    }
+
+    /// A datagram from the driving client's address, forged far ahead, would otherwise make every
+    /// real one stale and take the robot over.
+    #[test]
+    fn a_datagram_too_far_ahead_is_dropped() {
+        let (mut r, t) = (rx(), Instant::now());
+        r.on_datagram(t, addr(A), &pkt(5, Buttons::NONE, 0.5));
+        assert_eq!(
+            r.on_datagram(t, addr(A), &pkt(5 + MAX_SEQ_AHEAD + 1, Buttons::NONE, -1.0)),
+            Accept::Stale
+        );
+        assert_eq!(
+            r.on_datagram(t, addr(A), &pkt(6, Buttons::NONE, 0.5)),
+            Accept::Taken,
+            "the real client keeps driving"
+        );
+        assert_eq!(
+            r.on_datagram(t, addr(A), &pkt(6 + MAX_SEQ_AHEAD, Buttons::NONE, 0.5)),
+            Accept::Taken,
+            "the bound itself is accepted"
         );
     }
 
