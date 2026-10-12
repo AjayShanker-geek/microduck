@@ -381,14 +381,7 @@ mod tests {
         use pad_map::{Config, Mapper, Out};
 
         let (mut r, t) = (rx(), Instant::now());
-        let cfg = Config {
-            bindings: robotd_params::PadParams::default(),
-            imu_head: robotd_params::PadImuHeadControlParams::default(),
-            drive: robotd_params::PadDriveParams::default(),
-            deadzone: 0.1,
-            max_head: 2.5,
-            roller: false,
-        };
+        let cfg = Config::defaults(false, &Default::default());
         let mut mapper = Mapper::new();
         let (mut out, mut frame) = (Vec::new(), Vec::new());
         let mut requests = Vec::new();

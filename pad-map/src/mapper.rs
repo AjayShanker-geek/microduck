@@ -4,22 +4,10 @@
 use std::time::Instant;
 
 use duck_ipc_proto as proto;
+use robotd_params::pad_axes::{AxisBinding, Sticks};
 
 use crate::buttons::Buttons;
 use crate::hold::{HOME_HOLD, HoldAction, HoldButton, REST_HOLD, SHUTDOWN_HOLD};
-
-/// Body-pose stick ranges, from the training env via the prototype: z is asymmetric
-/// (little headroom up at the standing height, more crouch down), angles capped at ~15°.
-const BODY_MAX_Z_UP: f64 = 0.010;
-const BODY_MAX_Z_DOWN: f64 = 0.025;
-const BODY_MAX_ANGLE: f64 = 0.2618;
-
-/// The prototype's roller-mode stick shaping: push and brake are asymmetric, there is no
-/// strafe, and heading is capped at 0.3 rad/s regardless of the walking limits — the
-/// roller launch line's `--max-angular-vel 0.3`, unchanged across both of its eras.
-const ROLLER_PUSH: f64 = 0.6;
-const ROLLER_BRAKE: f64 = 0.5;
-const ROLLER_YAW: f64 = 0.3;
 
 /// What the sticks drive, picked on the D-pad. Modal because two sticks cannot express nine
 /// degrees of freedom.
@@ -68,59 +56,26 @@ fn mode_exit_calls(from: Mode, to: Mode) -> Vec<proto::Call> {
 /// The head pose for a pad attitude relative to its reference.
 ///
 /// `relative` is body → world of the pad now, in the frame of the reference — [`pad_imu::relative`].
-/// Its pitch, roll and yaw become the head's, scaled by `gain` and clamped to `max_head`. The signs
+/// Its pitch, roll and yaw become the head's, scaled by `gain` and clamped to each joint's
+/// `[pad_head]` limit — the same travel the sticks get. The signs
 /// are the ones that made the head copy the pad on the robot (2026-09-09): pad nose-up is a
 /// positive `head_pitch`, pad yaw to the left a positive `head_yaw`, and the pad rolling right
 /// (left side up) a negative `head_roll`. Pitch and roll came out opposite to the stick mapping's
 /// guess, which is worth knowing: the sticks' signs describe "stick up looks up", not the joint
 /// axes, and the pad frame is the joints'. The neck stays at zero: one pitch joint is enough to
 /// follow a wrist.
-fn head_from_pad(relative: [f32; 4], gain: f64, max_head: f64) -> proto::HeadParams {
+fn head_from_pad(
+    relative: [f32; 4],
+    gain: f64,
+    limits: &robotd_params::PadHeadParams,
+) -> proto::HeadParams {
     let [pitch, roll, yaw] = pad_imu::euler_deg(relative);
-    let angle = |degrees: f32| (f64::from(degrees).to_radians() * gain).clamp(-max_head, max_head);
+    let angle = |degrees: f32, max: f64| (f64::from(degrees).to_radians() * gain).clamp(-max, max);
     proto::HeadParams {
         neck_pitch: 0.0,
-        head_pitch: angle(pitch),
-        head_yaw: angle(yaw),
-        head_roll: -angle(roll),
-    }
-}
-
-/// How full deflection maps to velocity, for the modes that walk.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DriveLimits<'a> {
-    roller: bool,
-    /// `[pad_drive]`: each direction of each axis onto its own signed bound.
-    drive: &'a robotd_params::PadDriveParams,
-}
-
-impl DriveLimits<'_> {
-    /// A velocity from three stick axes: forward/back, strafe and turn. Which physical axis is
-    /// which depends on the mode; the shaping does not.
-    fn walk(&self, forward: f64, strafe: f64, turn: f64) -> proto::MoveParams {
-        if self.roller {
-            // The prototype's roller shaping: push harder than you can brake, no strafe,
-            // heading capped independently of the walking limits.
-            return proto::MoveParams {
-                vx: forward
-                    * if forward >= 0.0 {
-                        ROLLER_PUSH
-                    } else {
-                        ROLLER_BRAKE
-                    },
-                vy: 0.0,
-                vyaw: -turn * ROLLER_YAW,
-            };
-        }
-        let scale = robotd_params::PadDriveParams::scale;
-        let d = self.drive;
-        proto::MoveParams {
-            vx: scale(forward, d.vx_min, d.vx_max),
-            // `vy` is positive to the left; stick-left reads negative on every pad gilrs
-            // normalises.
-            vy: scale(-strafe, d.vy_min, d.vy_max),
-            vyaw: scale(-turn, d.vyaw_min, d.vyaw_max),
-        }
+        head_pitch: angle(pitch, limits.head_pitch_max),
+        head_yaw: angle(yaw, limits.head_yaw_max),
+        head_roll: -angle(roll, limits.head_roll_max),
     }
 }
 
@@ -145,14 +100,22 @@ pub struct PadFrame {
     pub has_imu: bool,
 }
 
-/// Everything the mapping reads that is not the pad.
+/// Everything the mapping reads that is not the pad: the controller sections of `robotd.toml`,
+/// read by [`Config::reload`], and the robot's drive mode, which the daemon asks for.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bindings: robotd_params::PadParams,
     pub imu_head: robotd_params::PadImuHeadControlParams,
+    /// `[pad_drive]`: full deflection while walking.
     pub drive: robotd_params::PadDriveParams,
-    pub deadzone: f64,
-    pub max_head: f64,
+    /// `[pad_axes]`: the deadzone, and which stick drives which command in each mode.
+    pub axes: robotd_params::PadAxesParams,
+    /// `[pad_head]`: full-deflection head travel per joint.
+    pub head: robotd_params::PadHeadParams,
+    /// `[pad_body]`: body + head mode's height and tilt ranges.
+    pub body: robotd_params::PadBodyParams,
+    /// `[pad_roller]`: full deflection on wheels, in place of `drive`.
+    pub roller_limits: robotd_params::PadRollerParams,
     pub roller: bool,
 }
 
@@ -223,7 +186,6 @@ impl Mapper {
     ) {
         out.clear();
         frame.clear();
-        let dz = |v: f64| if v.abs() < cfg.deadzone { 0.0 } else { v };
 
         // The pad's attitude this tick, when the feature is on and the pad has an IMU that has
         // said something believable. `None` is every other case, and head + move then poses the
@@ -421,11 +383,6 @@ impl Mapper {
             }
         }
 
-        let left_x = dz(pad.left_x);
-        let left_y = dz(pad.left_y);
-        let right_x = dz(pad.right_x);
-        let right_y = dz(pad.right_y);
-
         // Either trigger opens the mouth; the max wins, as in the prototype — where RT
         // also chirps and LT rides the wheee, which they now do here too.
         let rt = pad.rt;
@@ -461,83 +418,117 @@ impl Mapper {
         self.prev_rt = rt;
         self.prev_lt = lt;
 
-        let limits = DriveLimits {
-            roller: cfg.roller,
-            drive: &cfg.drive,
+        let sticks = Sticks {
+            left_x: pad.left_x,
+            left_y: pad.left_y,
+            right_x: pad.right_x,
+            right_y: pad.right_y,
         };
-
+        let imu = match (self.mode, self.imu_reference, attitude) {
+            (Mode::HeadDrive, Some(reference), Some(now)) => Some((reference, now)),
+            _ => None,
+        };
         // This tick's continuous intents, as one frame. Reused rather than built fresh:
         // a `Vec` per tick is an allocation fifty times a second to say what the sticks
         // were doing, which is the shape of thing this loop is meant not to do.
-        match self.mode {
-            Mode::Drive => frame.push(proto::Call::RobotMove(limits.walk(left_y, left_x, right_x))),
-            Mode::HeadDrive => match (self.imu_reference, attitude) {
-                // The pad's tilt has the head, so the sticks keep the whole drive mapping. In the
-                // same frame: the pad's tilt and the sticks describe one instant.
-                (Some(reference), Some(now)) => {
-                    frame.push(proto::Call::RobotMove(limits.walk(left_y, left_x, right_x)));
-                    frame.push(proto::Call::RobotHead(head_from_pad(
-                        pad_imu::relative(reference, now),
-                        cfg.imu_head.gain,
-                        cfg.max_head,
-                    )));
-                }
-                // Left stick walks and turns — no strafe, the right stick is busy — and the right
-                // stick looks around, with the signs head mode uses for its left stick.
-                _ => {
-                    frame.push(proto::Call::RobotMove(limits.walk(left_y, 0.0, left_x)));
-                    frame.push(proto::Call::RobotHead(proto::HeadParams {
-                        neck_pitch: 0.0,
-                        head_pitch: -right_y * cfg.max_head,
-                        head_yaw: -right_x * cfg.max_head,
-                        head_roll: 0.0,
-                    }));
-                }
-            },
-            Mode::Head => {
-                // The body must not keep its last velocity while the sticks are posing the
-                // head. The deadman would catch it eventually; a robot that keeps walking
-                // because you started moving its head is a bad enough surprise to be
-                // explicit about.
-                //
-                // In the same frame as the head rather than a notification of its own: the
-                // two describe one instant, and sending them separately was two `write_all`
-                // and two `flush` syscalls a tick to say so.
-                frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
-                // The prototype's alpha mapping, signs included (its head_pitch/head_yaw
-                // joint axes are inverted relative to stick direction — verified on
-                // hardware there, kept verbatim here).
-                frame.push(proto::Call::RobotHead(proto::HeadParams {
-                    neck_pitch: right_y * cfg.max_head,
-                    head_pitch: -left_y * cfg.max_head,
-                    head_yaw: -left_x * cfg.max_head,
-                    head_roll: right_x * cfg.max_head,
-                }));
+        stick_frame(self.mode, sticks, imu, cfg, frame);
+    }
+}
+
+/// What the sticks ask for in `mode`, appended to `frame`. Which stick drives what, which way
+/// round and how far is all `[pad_axes]` and its limits; what each mode sends is fixed here.
+fn stick_frame(
+    mode: Mode,
+    sticks: Sticks,
+    imu: Option<([f32; 4], [f32; 4])>,
+    cfg: &Config,
+    frame: &mut Vec<proto::Call>,
+) {
+    let value = |binding: &AxisBinding| binding.evaluate(sticks, cfg.axes.deadzone);
+    let scale = robotd_params::PadDriveParams::scale;
+    let roller_limits = cfg.roller_limits.limits();
+    let limits = if cfg.roller {
+        &roller_limits
+    } else {
+        &cfg.drive
+    };
+    let walk = |vx: &AxisBinding, vy: &AxisBinding, vyaw: &AxisBinding| {
+        proto::Call::RobotMove(proto::MoveParams {
+            vx: scale(value(vx), limits.vx_min, limits.vx_max),
+            vy: scale(value(vy), limits.vy_min, limits.vy_max),
+            vyaw: scale(value(vyaw), limits.vyaw_min, limits.vyaw_max),
+        })
+    };
+    let head = &cfg.head;
+    let look = |neck: &AxisBinding, pitch: &AxisBinding, yaw: &AxisBinding, roll: &AxisBinding| {
+        proto::Call::RobotHead(proto::HeadParams {
+            neck_pitch: value(neck) * head.neck_pitch_max,
+            head_pitch: value(pitch) * head.head_pitch_max,
+            head_yaw: value(yaw) * head.head_yaw_max,
+            head_roll: value(roll) * head.head_roll_max,
+        })
+    };
+    match mode {
+        Mode::Drive => {
+            let a = &cfg.axes.drive;
+            frame.push(walk(&a.vx, &a.vy, &a.vyaw));
+        }
+        Mode::HeadDrive => match imu {
+            // The pad's tilt has the head, so the sticks keep the whole drive mapping. In the
+            // same frame: the pad's tilt and the sticks describe one instant.
+            Some((reference, now)) => {
+                let a = &cfg.axes.drive;
+                frame.push(walk(&a.vx, &a.vy, &a.vyaw));
+                frame.push(proto::Call::RobotHead(head_from_pad(
+                    pad_imu::relative(reference, now),
+                    cfg.imu_head.gain,
+                    head,
+                )));
             }
-            Mode::BodyPose => {
-                frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
-                frame.push(proto::Call::RobotPose(proto::PoseParams {
-                    z: left_y
-                        * if left_y >= 0.0 {
-                            BODY_MAX_Z_UP
-                        } else {
-                            BODY_MAX_Z_DOWN
-                        },
-                    // No forward/back tilt here: the right stick has the head. The side lean
-                    // keeps the old body mode's sign, moved from the right stick to the left.
-                    pitch: 0.0,
-                    roll: left_x * BODY_MAX_ANGLE,
-                    active: true,
-                }));
-                // The same look-around as head + move, so the right stick means one thing
-                // wherever it poses the head.
-                frame.push(proto::Call::RobotHead(proto::HeadParams {
-                    neck_pitch: 0.0,
-                    head_pitch: -right_y * cfg.max_head,
-                    head_yaw: -right_x * cfg.max_head,
-                    head_roll: 0.0,
-                }));
+            None => {
+                let a = &cfg.axes.head_drive;
+                frame.push(walk(&a.vx, &a.vy, &a.vyaw));
+                frame.push(look(
+                    &a.neck_pitch,
+                    &a.head_pitch,
+                    &a.head_yaw,
+                    &a.head_roll,
+                ));
             }
+        },
+        Mode::Head => {
+            // The body must not keep its last velocity while the sticks are posing the
+            // head. The deadman would catch it eventually; a robot that keeps walking
+            // because you started moving its head is a bad enough surprise to be
+            // explicit about.
+            //
+            // In the same frame as the head rather than a notification of its own: the
+            // two describe one instant, and sending them separately was two `write_all`
+            // and two `flush` syscalls a tick to say so.
+            frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
+            let a = &cfg.axes.head;
+            frame.push(look(
+                &a.neck_pitch,
+                &a.head_pitch,
+                &a.head_yaw,
+                &a.head_roll,
+            ));
+        }
+        Mode::BodyPose => {
+            frame.push(proto::Call::RobotMove(proto::MoveParams::default()));
+            let (a, body) = (&cfg.axes.body_pose, &cfg.body);
+            frame.push(proto::Call::RobotPose(proto::PoseParams {
+                z: scale(value(&a.z), body.z_min, body.z_max),
+                pitch: value(&a.pitch) * body.pitch_max,
+                roll: value(&a.roll) * body.roll_max,
+                active: true,
+            }));
+            frame.push(look(
+                &a.neck_pitch,
+                &a.head_pitch,
+                &a.head_yaw,
+                &a.head_roll,
+            ));
         }
     }
 }
@@ -583,14 +574,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> Config {
-        Config {
-            bindings: robotd_params::PadParams::default(),
-            imu_head: robotd_params::PadImuHeadControlParams::default(),
-            drive: robotd_params::PadDriveParams::default(),
-            deadzone: 0.1,
-            max_head: 2.5,
-            roller: false,
-        }
+        Config::defaults(false, &Default::default())
     }
 
     /// The whole path a frame takes: a D-pad edge changes mode once, a held one does not change
@@ -703,7 +687,7 @@ mod tests {
             0.0,
             (15.0f32.to_radians()).sin(),
         ];
-        let head = head_from_pad(pad_imu::relative(yawed, yawed), 1.0, 2.5);
+        let head = head_from_pad(pad_imu::relative(yawed, yawed), 1.0, &cfg().head);
         assert!(
             head.head_yaw.abs() < 1e-4 && head.head_pitch.abs() < 1e-4,
             "{head:?}"
@@ -718,7 +702,7 @@ mod tests {
         let half = 15.0f32.to_radians();
         // 30° nose up: a rotation about +Y.
         let nose_up = [half.cos(), 0.0, half.sin(), 0.0];
-        let head = head_from_pad(nose_up, 1.0, 2.5);
+        let head = head_from_pad(nose_up, 1.0, &cfg().head);
         assert!(
             (head.head_pitch - 30.0f64.to_radians()).abs() < 0.01,
             "{head:?}"
@@ -731,7 +715,7 @@ mod tests {
 
         // 30° rolled right (left side up): about +X. The head rolls the other sign.
         let rolled = [half.cos(), half.sin(), 0.0, 0.0];
-        let head = head_from_pad(rolled, 1.0, 2.5);
+        let head = head_from_pad(rolled, 1.0, &cfg().head);
         assert!(
             (head.head_roll - (-30.0f64.to_radians())).abs() < 0.01,
             "{head:?}"
@@ -739,19 +723,23 @@ mod tests {
 
         // 30° yaw left: about +Z.
         let left = [half.cos(), 0.0, 0.0, half.sin()];
-        let head = head_from_pad(left, 1.0, 2.5);
+        let head = head_from_pad(left, 1.0, &cfg().head);
         assert!(
             (head.head_yaw - 30.0f64.to_radians()).abs() < 0.01,
             "{head:?}"
         );
 
-        // Gain 2 doubles it; a limit of 0.5 rad clamps it.
-        let head = head_from_pad(left, 2.0, 2.5);
+        // Gain 2 doubles it; a yaw limit of 0.5 rad clamps it.
+        let head = head_from_pad(left, 2.0, &cfg().head);
         assert!(
             (head.head_yaw - 60.0f64.to_radians()).abs() < 0.01,
             "{head:?}"
         );
-        let head = head_from_pad(left, 2.0, 0.5);
+        let tight = robotd_params::PadHeadParams {
+            head_yaw_max: 0.5,
+            ..Default::default()
+        };
+        let head = head_from_pad(left, 2.0, &tight);
         assert!((head.head_yaw - 0.5).abs() < 1e-6, "{head:?}");
     }
 
@@ -794,36 +782,181 @@ mod tests {
         assert!(mode_exit_calls(Mode::BodyPose, Mode::BodyPose).is_empty());
     }
 
-    /// Head + move drives with the left stick alone — forward and turn, no strafe — and on wheels
-    /// it takes the roller shaping like every other walking mode.
+    fn sticks(left_x: f64, left_y: f64, right_x: f64, right_y: f64) -> Sticks {
+        Sticks {
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+        }
+    }
+
+    fn calls(mode: Mode, cfg: &Config, sticks: Sticks) -> Vec<proto::Call> {
+        let mut frame = Vec::new();
+        stick_frame(mode, sticks, None, cfg, &mut frame);
+        frame
+    }
+
+    /// Every command a frame carries, flattened: vx, vy, vyaw, neck_pitch, head_pitch, head_yaw,
+    /// head_roll, body z, body pitch, body roll.
+    fn flat(calls: &[proto::Call]) -> [f64; 10] {
+        let mut out = [0.0; 10];
+        for call in calls {
+            match call {
+                proto::Call::RobotMove(m) => out[..3].copy_from_slice(&[m.vx, m.vy, m.vyaw]),
+                proto::Call::RobotHead(h) => out[3..7].copy_from_slice(&[
+                    h.neck_pitch,
+                    h.head_pitch,
+                    h.head_yaw,
+                    h.head_roll,
+                ]),
+                proto::Call::RobotPose(b) => {
+                    assert!(b.active);
+                    out[7..].copy_from_slice(&[b.z, b.pitch, b.roll]);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        out
+    }
+
+    /// The shipped mapping, one axis at a time and both ways: with nothing in `[pad_axes]`, every
+    /// stick in every mode drives what it always has, with the sign it always had. Expected values
+    /// are written out, not computed with the evaluator.
     #[test]
-    fn head_and_move_walks_and_turns_from_the_left_stick() {
-        let drive = robotd_params::PadDriveParams {
-            vx_min: -0.2,
-            ..Default::default()
-        };
-        let walking = DriveLimits {
-            roller: false,
-            drive: &drive,
-        };
-        // Left stick up and to the left: forward, turning left.
-        let twist = walking.walk(1.0, 0.0, -1.0);
-        assert_eq!(twist.vx, 0.4);
-        assert_eq!(twist.vy, 0.0);
-        assert_eq!(twist.vyaw, 1.0, "stick left turns left (positive yaw)");
+    fn every_default_stick_axis_drives_what_it_always_has() {
+        let cfg = cfg();
+        let (vx, vy, vyaw, head) = (0.4, 0.3, 1.0, 2.5);
+        #[rustfmt::skip]
+        let cases = [
+            (Mode::Drive, sticks(1.0, 0.0, 0.0, 0.0), [0.0, -vy, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::Drive, sticks(0.0, 1.0, 0.0, 0.0), [vx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::Drive, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, -vyaw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::Drive, sticks(0.0, 0.0, 0.0, 1.0), [0.0; 10]),
+            (Mode::Head, sticks(1.0, 0.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::Head, sticks(0.0, 1.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::Head, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, head, 0.0, 0.0, 0.0]),
+            (Mode::Head, sticks(0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0, head, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::HeadDrive, sticks(1.0, 0.0, 0.0, 0.0), [0.0, 0.0, -vyaw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::HeadDrive, sticks(0.0, 1.0, 0.0, 0.0), [vx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::HeadDrive, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::HeadDrive, sticks(0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::BodyPose, sticks(1.0, 0.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2618]),
+            (Mode::BodyPose, sticks(0.0, 1.0, 0.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.010, 0.0, 0.0]),
+            (Mode::BodyPose, sticks(0.0, 0.0, 1.0, 0.0), [0.0, 0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0]),
+            (Mode::BodyPose, sticks(0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0, 0.0, -head, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ];
+        for (mode, positive, expected) in cases {
+            for direction in [1.0, -1.0] {
+                let s = sticks(
+                    positive.left_x * direction,
+                    positive.left_y * direction,
+                    positive.right_x * direction,
+                    positive.right_y * direction,
+                );
+                let frame = calls(mode, &cfg, s);
+                let mut expected = expected.map(|v| v * direction);
+                // The crouch goes further down than the rise goes up.
+                if mode == Mode::BodyPose && direction < 0.0 && positive.left_y != 0.0 {
+                    expected[7] = -0.025;
+                }
+                assert_eq!(flat(&frame), expected, "{mode:?}, {s:?}");
+                let sent = match mode {
+                    Mode::Drive => 1,
+                    Mode::BodyPose => 3,
+                    _ => 2,
+                };
+                assert_eq!(frame.len(), sent, "{mode:?}: {frame:?}");
+            }
+        }
+    }
+
+    /// Head + move drives with the left stick alone — forward and turn, no strafe — and on wheels
+    /// every walking mode takes `[pad_roller]`: push harder than brake, no strafe, slow turns.
+    #[test]
+    fn on_wheels_the_roller_limits_shape_every_walking_mode() {
+        let mut cfg = cfg();
+        cfg.drive.vx_min = -0.2;
+        let twist = |cfg: &Config, mode, s| flat(&calls(mode, cfg, s));
+        let t = twist(&cfg, Mode::HeadDrive, sticks(-1.0, 1.0, 0.0, 0.0));
         assert_eq!(
-            walking.walk(-1.0, 0.0, 0.0).vx,
-            -0.2,
-            "reverse has its own cap"
+            &t[..3],
+            &[0.4, 0.0, 1.0],
+            "stick left turns left (positive yaw)"
+        );
+        assert_eq!(
+            twist(&cfg, Mode::Drive, sticks(0.0, -1.0, 0.0, 0.0))[0],
+            -0.2
         );
 
-        let rolling = DriveLimits {
-            roller: true,
-            ..walking
+        cfg.roller = true;
+        for (mode, s) in [
+            (Mode::Drive, sticks(1.0, -1.0, -1.0, 0.0)),
+            (Mode::HeadDrive, sticks(-1.0, -1.0, 0.0, 0.0)),
+        ] {
+            assert_eq!(&twist(&cfg, mode, s)[..3], &[-0.5, 0.0, 0.3], "{mode:?}");
+        }
+        assert_eq!(twist(&cfg, Mode::Drive, sticks(0.0, 1.0, 0.0, 0.0))[0], 0.6);
+    }
+
+    /// A binding moved, reversed, made gentler or switched off reaches the command, and so does
+    /// each limit section.
+    #[test]
+    fn custom_bindings_and_limits_reach_the_commands() {
+        use robotd_params::pad_axes::AxisSource;
+        let mut cfg = cfg();
+        cfg.axes.drive.vx = AxisBinding {
+            source: AxisSource::RightY,
+            invert: true,
+            gain: 4.0,
         };
-        let twist = rolling.walk(-1.0, 1.0, -1.0);
-        assert_eq!(twist.vx, -ROLLER_BRAKE);
-        assert_eq!(twist.vy, 0.0, "no strafe on wheels");
-        assert_eq!(twist.vyaw, ROLLER_YAW);
+        cfg.axes.drive.vyaw.source = AxisSource::None;
+        cfg.drive.vx_min = -0.2;
+        let t = flat(&calls(Mode::Drive, &cfg, sticks(0.0, 0.0, 1.0, 0.5)));
+        assert_eq!(
+            (t[0], t[2]),
+            (-0.2, 0.0),
+            "gain 4 reaches the reverse cap; turn is off"
+        );
+
+        cfg.head.head_yaw_max = 0.7;
+        cfg.axes.head.head_yaw.source = AxisSource::RightY;
+        cfg.axes.head.head_yaw.gain = 0.5;
+        let t = flat(&calls(Mode::Head, &cfg, sticks(0.0, 0.0, 0.0, 1.0)));
+        assert_eq!(t[5], -0.35);
+
+        cfg.body.pitch_max = 0.2;
+        cfg.axes.body_pose.pitch.source = AxisSource::RightX;
+        let t = flat(&calls(Mode::BodyPose, &cfg, sticks(0.0, 0.0, 1.0, 0.0)));
+        assert_eq!(t[8], 0.2);
+
+        cfg.roller = true;
+        cfg.roller_limits.vyaw_max = 0.1;
+        let t = flat(&calls(Mode::HeadDrive, &cfg, sticks(-1.0, 0.0, 0.0, 0.0)));
+        assert_eq!(t[2], 0.1);
+    }
+
+    /// With the pad's IMU on the head, head + move takes the *drive* bindings for the sticks —
+    /// not head + move's own — and the head stays inside its per-joint `[pad_head]` limits.
+    #[test]
+    fn the_imu_head_uses_the_drive_bindings_and_the_head_limits() {
+        use robotd_params::pad_axes::AxisSource;
+        let mut cfg = cfg();
+        cfg.axes.drive.vx.source = AxisSource::RightY;
+        cfg.axes.head_drive.vx.source = AxisSource::None;
+        cfg.head.head_pitch_max = 0.1;
+        let half = 0.25_f32;
+        let nose_up = [half.cos(), 0.0, half.sin(), 0.0];
+        let mut frame = Vec::new();
+        stick_frame(
+            Mode::HeadDrive,
+            sticks(0.0, 0.0, 0.0, 1.0),
+            Some(([1.0, 0.0, 0.0, 0.0], nose_up)),
+            &cfg,
+            &mut frame,
+        );
+        let t = flat(&frame);
+        assert_eq!(t[0], 0.4);
+        assert!((t[4] - 0.1).abs() < 1e-6, "{t:?}");
     }
 }

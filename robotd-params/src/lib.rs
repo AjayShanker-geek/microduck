@@ -20,6 +20,9 @@ pub mod board;
 pub mod edit;
 pub mod registry;
 
+pub mod pad_axes;
+pub use pad_axes::{PadAxesParams, PadBodyParams, PadHeadParams, PadRollerParams};
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -95,6 +98,15 @@ pub struct Params {
     pub pad_imu_head_control: PadImuHeadControlParams,
     /// How fast full stick deflection drives the robot. `padd` reads this as well.
     pub pad_drive: PadDriveParams,
+    /// Which stick drives which command, per D-pad mode. `padd` and `netpadd` read this, and
+    /// the three sections after it, through `pad-map`.
+    pub pad_axes: PadAxesParams,
+    /// Full-deflection head travel per joint.
+    pub pad_head: PadHeadParams,
+    /// Body + head mode's height and tilt ranges.
+    pub pad_body: PadBodyParams,
+    /// `[pad_drive]` on wheels.
+    pub pad_roller: PadRollerParams,
     /// The pad over UDP: `netpadd` reads this, and so does `padd`, to know whether to stand down.
     pub netpad: NetpadParams,
 }
@@ -105,7 +117,7 @@ pub struct Params {
 /// Each axis has a bound per direction, signed in the robot's own frame — `vx` forward, `vy` to
 /// the left, `vyaw` counter-clockwise seen from above — so a `_min` is the bound in the negative
 /// direction and is itself negative (or zero, to forbid that direction). The stick is linear
-/// between centre and either bound. Walk mode only: roller mode keeps its own shaping.
+/// between centre and either bound. Walk mode only: on wheels it is `[pad_roller]`.
 ///
 /// This is what the *pad* asks for, not a limit on the robot. A `robot.move` from anywhere else
 /// is not bounded by it, and the policy only follows commands inside the range it was trained
@@ -2230,6 +2242,12 @@ pub enum ParamsError {
     },
     #[error("{path}: control.hz must be between 1 and 1000, got {got}")]
     Rate { path: String, got: u32 },
+    #[error("{path}: invalid controller setting {key}: {reason}")]
+    PadSetting {
+        path: String,
+        key: String,
+        reason: &'static str,
+    },
     #[error(
         "{path}: media.bitrate must be between {min} and {max} bits per second, got {got} — \
          the unit is bits, so 2 Mb/s is 2000000"
@@ -2387,6 +2405,53 @@ impl Params {
                 ),
             });
         }
+        let invalid = |key: &str, reason| ParamsError::PadSetting {
+            path: path.display().to_string(),
+            key: key.to_owned(),
+            reason,
+        };
+        if !(self.pad_axes.deadzone.is_finite() && (0.0..1.0).contains(&self.pad_axes.deadzone)) {
+            return Err(invalid("pad_axes.deadzone", "must be finite and in [0, 1)"));
+        }
+        for (key, binding) in self.pad_axes.bindings() {
+            if !(binding.gain.is_finite() && binding.gain >= 0.0) {
+                return Err(invalid(
+                    &format!("{key}.gain"),
+                    "must be finite and nonnegative",
+                ));
+            }
+        }
+        for (key, value) in [
+            ("pad_head.neck_pitch_max", self.pad_head.neck_pitch_max),
+            ("pad_head.head_pitch_max", self.pad_head.head_pitch_max),
+            ("pad_head.head_yaw_max", self.pad_head.head_yaw_max),
+            ("pad_head.head_roll_max", self.pad_head.head_roll_max),
+            ("pad_body.pitch_max", self.pad_body.pitch_max),
+            ("pad_body.roll_max", self.pad_body.roll_max),
+        ] {
+            if !(value.is_finite() && value >= 0.0) {
+                return Err(invalid(key, "must be finite and nonnegative"));
+            }
+        }
+        for (key, min, max) in std::iter::once((
+            "pad_body.z".to_owned(),
+            self.pad_body.z_min,
+            self.pad_body.z_max,
+        ))
+        .chain(
+            self.pad_roller
+                .limits()
+                .axes()
+                .into_iter()
+                .map(|(axis, min, max)| (format!("pad_roller.{axis}"), min, max)),
+        ) {
+            if !(min.is_finite() && max.is_finite() && min <= 0.0 && max >= 0.0) {
+                return Err(invalid(
+                    &key,
+                    "min must be finite and nonpositive; max finite and nonnegative",
+                ));
+            }
+        }
         // An inverted band would pause and resume on the same probability, every tick.
         let (pause, resume) = (self.pickup.pause_threshold, self.pickup.resume_threshold);
         if !(0.0 < resume && resume < pause && pause < 1.0) {
@@ -2402,6 +2467,28 @@ impl Params {
     pub fn period(&self) -> std::time::Duration {
         std::time::Duration::from_secs_f64(1.0 / self.control.hz as f64)
     }
+}
+
+/// Drops every key under `prefix` the registry does not know, recursing into tables that hold
+/// registry keys — `[pad_axes.drive.vyaw]` is three levels down — and naming each one dropped.
+fn prune_fields(prefix: &str, fields: &mut toml::Table, ignored: &mut Vec<String>) {
+    fields.retain(|key, value| {
+        let path = format!("{prefix}.{key}");
+        if registry::entry_for(&path).is_some() {
+            return true;
+        }
+        if registry::REGISTRY
+            .iter()
+            .any(|entry| entry.key.starts_with(&format!("{path}.")))
+        {
+            if let Some(children) = value.as_table_mut() {
+                prune_fields(&path, children, ignored);
+            }
+            return true;
+        }
+        ignored.push(path);
+        false
+    });
 }
 
 /// Re-parse a file that `deny_unknown_fields` rejected, dropping the keys this build has no
@@ -2450,14 +2537,7 @@ fn without_unknown_keys(text: &str) -> Option<(Result<Params, toml::de::Error>, 
             ignored.push(format!("[{section}]"));
             return false;
         }
-        fields.retain(|key, _| {
-            if registry::entry_for(&format!("{section}.{key}")).is_some() {
-                true
-            } else {
-                ignored.push(format!("{section}.{key}"));
-                false
-            }
-        });
+        prune_fields(section, fields, &mut ignored);
         true
     });
 
@@ -2536,6 +2616,45 @@ mod tests {
                 crate::registry::Kind::OptionalPath,
                 "{key} must be a path slot"
             );
+        }
+    }
+
+    /// A partial binding keeps the rest of its mode's default, an unknown nested key is dropped
+    /// rather than taking the bindings with it, and every out-of-range value is refused.
+    #[test]
+    fn controller_partial_overrides_and_invalid_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("robotd.toml");
+        std::fs::write(&path, "[pad_axes.drive.vyaw]\ngain = 0.5\n").unwrap();
+        let params = Params::load(&path, true).unwrap();
+        assert_eq!(params.pad_axes.drive.vyaw.gain, 0.5);
+        assert!(params.pad_axes.drive.vyaw.invert);
+        assert_eq!(
+            params.pad_axes.drive.vyaw.source,
+            pad_axes::AxisSource::RightX
+        );
+        // An unrelated future setting must not erase the recognized nested bindings.
+        std::fs::write(
+            &path,
+            "[pad_axes.drive.vyaw]\ngain = 0.5\nfuture_setting = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Params::load(&path, true).unwrap().pad_axes.drive.vyaw.gain,
+            0.5
+        );
+        for text in [
+            "[pad_axes]\ndeadzone = 1.0",
+            "[pad_axes]\ndeadzone = nan",
+            "[pad_axes.drive.vx]\ngain = -1.0",
+            "[pad_axes.drive.vx]\ngain = inf",
+            "[pad_axes.drive.vx]\nsource = 'typo'",
+            "[pad_head]\nhead_yaw_max = -1.0",
+            "[pad_body]\nz_min = 0.01",
+            "[pad_roller]\nvx_max = -0.2",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert!(Params::load(&path, true).is_err(), "accepted {text}");
         }
     }
 

@@ -102,8 +102,8 @@ use clap::Parser;
 use duck_ipc_proto as proto;
 use gilrs::{Axis, Button, Gilrs};
 use pad_map::{
-    BINDINGS_POLL, Buttons, Config, Continuous, Mapper, Out, PadFrame, PadLoss, PadLossAction,
-    read_bindings,
+    BINDINGS_POLL, Buttons, Config, Continuous, Mapper, Out, Overrides, PadFrame, PadLoss,
+    PadLossAction,
 };
 
 #[cfg(target_os = "linux")]
@@ -172,16 +172,13 @@ struct Args {
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=1000))]
     hz: u32,
 
-    /// Deflection below this counts as centre. Analogue sticks rarely rest at exactly zero,
-    /// and without this the robot creeps. The prototype's value.
-    #[arg(long, default_value_t = 0.1)]
-    deadzone: f64,
+    /// Over `pad_axes.deadzone`, for bench use: deflection below this counts as centre.
+    #[arg(long, value_parser = pad_map::parse_deadzone)]
+    deadzone: Option<f64>,
 
-    /// Full-deflection head travel, radians. The head command feeds the policy's
-    /// observation rather than a servo directly, so this is the prototype's generous 2.5 —
-    /// the network itself decides how far the head actually goes.
-    #[arg(long, default_value_t = 2.5)]
-    max_head: f64,
+    /// Over every `[pad_head]` limit, for bench use: full-deflection head travel, radians.
+    #[arg(long, value_parser = pad_map::parse_max_head)]
+    max_head: Option<f64>,
 
     /// Where to serve the raw input tap: the pad's own event stream, for `robotctl monitor`.
     ///
@@ -307,26 +304,20 @@ fn main() -> std::process::ExitCode {
     );
 
     let period = Duration::from_secs_f64(1.0 / args.hz as f64);
-    // The button bindings, read once like every other daemon reads its config. A file that will
-    // not parse is not a reason to leave somebody without a pad: the default mapping is the
-    // fallback, and the reason is logged.
-    let (bindings, imu_head, drive) = read_bindings(&args.config);
+    // Everything the mapping reads that is not the pad: the controller sections of the config
+    // and the drive mode. A file that will not parse is not a reason to leave somebody without a
+    // pad: the built-in mapping is the fallback, and the reason is logged.
+    let overrides = Overrides {
+        deadzone: args.deadzone,
+        max_head: args.max_head,
+    };
+    let mut config = Config::defaults(roller, &overrides);
+    config.reload(&args.config, &overrides);
     // When the file was last written, so a change is picked up without a restart. `padd` holds
     // no motor control and no session state — the whole of it is this table — so re-reading is a
     // swap between two ticks rather than anything to sequence.
     let mut bindings_at = config_mtime(&args.config);
     let mut bindings_checked = Instant::now();
-
-    // Everything the mapping reads that is not the pad. Rebuilt — a field at a time — whenever the
-    // bindings reload or the drive mode changes; the rest is flags fixed at startup.
-    let mut config = Config {
-        bindings,
-        imu_head,
-        drive,
-        deadzone: args.deadzone,
-        max_head: args.max_head,
-        roller,
-    };
     // What the pad means: the mode, the holds, the trigger edges and whether the robot is up.
     // `pad_map`, so that `netpadd` maps a pad exactly as this does.
     let mut mapper = Mapper::new();
@@ -352,8 +343,9 @@ fn main() -> std::process::ExitCode {
             let now = config_mtime(&args.config);
             if now != bindings_at {
                 bindings_at = now;
-                (config.bindings, config.imu_head, config.drive) = read_bindings(&args.config);
-                tracing::warn!("button bindings reloaded");
+                if config.reload(&args.config, &overrides) {
+                    tracing::warn!("controller settings reloaded");
+                }
             }
             match ask_roller(&mut stream, &mut next_id) {
                 Ok(Some(now)) if now != config.roller => {

@@ -13,7 +13,7 @@ pub mod loss;
 mod mapper;
 pub mod wire;
 
-pub use bindings::{BINDINGS_POLL, read_bindings};
+pub use bindings::{BINDINGS_POLL, Overrides, parse_deadzone, parse_max_head};
 pub use buttons::Buttons;
 pub use continuous::{Continuous, HEARTBEAT};
 pub use hold::{HoldAction, HoldButton};
