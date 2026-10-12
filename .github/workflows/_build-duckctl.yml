@@ -7,7 +7,11 @@
 # wheel, so there is no second build that could differ from the first. On Linux maturin builds in
 # the manylinux_2_28 container, so either form runs on glibc 2.28 or newer (Debian 10, Ubuntu 20.04)
 # rather than on whatever the runner image has; libdbus is compiled in (`duckctl/Cargo.toml`), which
-# is what makes that a real manylinux wheel rather than one with a library grafted in.
+# is what makes that a real manylinux wheel rather than one with a library grafted in. libudev,
+# which gilrs reads pads through for `udp-pad`, cannot be compiled in: the container gets its
+# headers, and maturin's default auditwheel repair grafts `libudev.so.1` into the wheel. The tarball
+# is the bare binary, so on Linux it takes the machine's own libudev, which every systemd
+# distribution has.
 #
 # A tarball per Unix platform so the executable bit survives; a zip for Windows, which PowerShell's
 # `Expand-Archive` reads. The macOS binaries are unsigned: fetched with curl or uv they run, fetched
@@ -77,6 +81,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --locked --out ${{ github.workspace }}/wheels
+          before-script-linux: dnf install -y systemd-devel
 
       - name: Package the binary out of the wheel
         run: |
