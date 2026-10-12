@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
 #   curl -fsSL .../install-duckctl.sh | sh -s -- udp-pad
 #
-# The binary comes from the `duckctl-dev-<branch>` prerelease that `.github/workflows/duckctl.yml`
+# The binary comes from the `daemon-dev-<branch>` prerelease that `.github/workflows/dev.yml`
 # replaces on every push; the branch defaults to `main`. It goes to `$DUCKCTL_DIR`, by default
 # `~/.local/bin`, which needs no sudo.
 set -eu
@@ -25,14 +25,14 @@ case "$(uname -m)" in
     *) echo "install-duckctl: no build for $(uname -m)" >&2; exit 1 ;;
 esac
 
-url="https://github.com/${REPO}/releases/download/duckctl-dev-${branch}/duckctl-${os}-${arch}.tar.gz"
+url="https://github.com/${REPO}/releases/download/daemon-dev-${branch}/duckctl-${os}-${arch}.tar.gz"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "duckctl from ${branch}: ${url}"
 if ! curl -fsSL "$url" -o "$tmp/duckctl.tar.gz"; then
-    echo "install-duckctl: no build of '${branch}' — has the branch been pushed since the" >&2
-    echo "duckctl workflow existed, and has its run finished?" >&2
+    echo "install-duckctl: no build of '${branch}' — has the branch been pushed since dev.yml" >&2
+    echo "built duckctl, and has that run finished?" >&2
     exit 1
 fi
 tar -xzf "$tmp/duckctl.tar.gz" -C "$tmp"

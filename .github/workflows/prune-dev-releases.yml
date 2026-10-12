@@ -1,8 +1,8 @@
 # Delete the dev-channel prerelease belonging to a branch that no longer exists.
 #
-# `dev.yml` publishes every branch push to a moving tag `daemon-dev-<branch>`, and `duckctl.yml`
-# to `duckctl-dev-<branch>`. Nothing ever removed those, so each merged branch left a prerelease
-# and ~11 MB of signed binaries behind for good.
+# `dev.yml` publishes every branch push to a moving tag `daemon-dev-<branch>`. Nothing ever
+# removed those, so each merged branch left a prerelease and ~11 MB of signed binaries
+# behind for good.
 #
 # Tidiness is the least of it. **A dead tag stays installable**: months later
 # `robotctl update apply daemon --ref some-old-branch` still resolves, verifies and
@@ -54,10 +54,9 @@ jobs:
           echo
 
           deleted=0
-          # `duckctl-dev-` is `duckctl.yml`'s per-branch client build, removed with its branch the same way.
           for tag in $(gh release list --limit 200 --json tagName --jq '.[].tagName' \
-                       | grep -E '^(daemon|duckctl)-dev-' || true); do
-              branch="${tag#*-dev-}"
+                       | grep '^daemon-dev-' || true); do
+              branch="${tag#daemon-dev-}"
 
               # `grep -x` so a branch named `foo` does not keep `daemon-dev-foo-bar` alive.
               if echo "$branches" | grep -qx -- "$branch"; then

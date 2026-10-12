@@ -29,14 +29,14 @@ curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scri
 On Windows, in PowerShell:
 
 ```powershell
-irm https://github.com/pollen-robotics/microduck/releases/download/duckctl-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+irm https://github.com/pollen-robotics/microduck/releases/download/daemon-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
 ```
 
 ```powershell
 Expand-Archive duckctl.zip -DestinationPath .
 ```
 
-Every branch push publishes these builds as the `duckctl-dev-<branch>` prerelease. A macOS binary
+Every branch push publishes these builds on the `daemon-dev-<branch>` prerelease, beside the daemon. A macOS binary
 downloaded in a browser rather than with the script is quarantined; clear it with
 `xattr -d com.apple.quarantine duckctl`.
 
