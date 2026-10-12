@@ -550,14 +550,8 @@ impl Mapper {
 /// included — it then says "toggled", as it always did.
 pub fn report(call: &proto::Call, response: Option<&proto::Response>) {
     let result = response.and_then(|r| r.result_as::<proto::IntentResult>().ok());
-    if let Some(response) = response {
-        if let Some(error) = &response.error {
-            tracing::warn!(code = error.code, message = %error.message, "refused");
-        } else if let Some(result) = &result
-            && !result.accepted
-        {
-            tracing::warn!(reason = ?result.reason, "not accepted");
-        }
+    if let Some(reason) = refusal(response) {
+        tracing::warn!(call = call.method(), %reason, "refused");
     }
     if let proto::Call::RobotEnable(proto::EnableParams { toggle: true, .. }) = call {
         // The robot names the state it ended in; that is the log, since padd no longer has a
@@ -567,6 +561,21 @@ pub fn report(call: &proto::Call, response: Option<&proto::Response>) {
             .unwrap_or_else(|| "toggled".to_owned());
         tracing::warn!(%outcome, "policy");
     }
+}
+
+/// Why the robot did not carry out a request, when it did not: a JSON-RPC error, or an intent
+/// answered `accepted: false`. `None` for a request it took.
+pub fn refusal(response: Option<&proto::Response>) -> Option<String> {
+    let response = response?;
+    if let Some(error) = &response.error {
+        return Some(error.message.clone());
+    }
+    let result = response.result_as::<proto::IntentResult>().ok()?;
+    (!result.accepted).then(|| {
+        result
+            .reason
+            .unwrap_or_else(|| "refused, no reason given".to_owned())
+    })
 }
 
 #[cfg(test)]

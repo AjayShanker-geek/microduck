@@ -5,9 +5,11 @@
 //! next replaces it — and nothing ever has to be retransmitted or reordered.
 //!
 //! [`Status`] is the answer `netpadd` sends back, so a sender can see the link: which datagram it
-//! answers, and the receiver's running counts. A sender may ignore it entirely.
+//! answers, and the receiver's running counts. [`RobotReport`] is the robot's health, sent to the
+//! driving client every [`REPORT_EVERY`]. A sender may ignore both entirely.
 
 use crate::{Buttons, PadFrame};
+use duck_ipc_proto as proto;
 
 pub const MAGIC: [u8; 4] = *b"DKPD";
 pub const VERSION: u8 = 1;
@@ -226,6 +228,98 @@ impl Status {
     }
 }
 
+pub const REPORT_MAGIC: [u8; 4] = *b"DKRB";
+pub const REPORT_VERSION: u8 = 1;
+/// How often the driving client is sent a [`RobotReport`].
+pub const REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+/// A refusal is reported for this long after it happened, then dropped.
+pub const REFUSAL_KEPT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What the robot is, as `netpadd` last heard from `robotd`: `magic`, `version`, then JSON.
+///
+/// JSON rather than a fixed layout because it carries `robotd`'s own [`proto::HealthResult`]
+/// unchanged — a field added there reaches a client without a second format to keep in step —
+/// and because it goes once a second to one client, where the bytes do not matter and a reader
+/// in any language does. Every field is optional: an absent one is *not known*, never zero.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RobotReport {
+    /// `robot.health`, as `robotd` last answered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<proto::HealthResult>,
+    /// Why there is no `health`: `robotd` not answering, or not answering in time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posture: Option<Posture>,
+    /// Why there is no `posture`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posture_error: Option<String>,
+    /// The last request the robot said no to, within [`REFUSAL_KEPT`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
+}
+
+/// What the robot is doing, from `robot.state`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Posture {
+    /// The policy that drove the last tick: `walk`, `stand`, `held`, …
+    pub policy: String,
+    pub fallen: bool,
+    pub limp: bool,
+    pub picked_up: bool,
+}
+
+/// A request from the pad the robot did not carry out, and its reason.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Refusal {
+    /// The method, `robot.do`, `robot.enable`, …
+    pub method: String,
+    pub reason: String,
+    /// How long before this report it happened.
+    pub ago_ms: u64,
+}
+
+#[derive(Debug)]
+pub enum ReportError {
+    Wire(WireError),
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for ReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wire(e) => e.fmt(f),
+            Self::Json(e) => write!(f, "robot report: {e}"),
+        }
+    }
+}
+
+impl RobotReport {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = REPORT_MAGIC.to_vec();
+        b.push(REPORT_VERSION);
+        // A struct of options, strings and numbers: serialising it cannot fail.
+        b.extend(serde_json::to_vec(self).unwrap_or_default());
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, ReportError> {
+        if b.len() < 5 {
+            return Err(ReportError::Wire(WireError::Short(b.len())));
+        }
+        if b[..4] != REPORT_MAGIC {
+            return Err(ReportError::Wire(WireError::Magic));
+        }
+        if b[4] != REPORT_VERSION {
+            return Err(ReportError::Wire(WireError::Version(b[4])));
+        }
+        serde_json::from_slice(&b[5..]).map_err(ReportError::Json)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +345,64 @@ mod tests {
         let mut odd = b;
         odd[5] = 9;
         assert_eq!(Status::decode(&odd).unwrap().verdict, Verdict::Other(9));
+    }
+
+    /// Everything a report can carry, filled: still one unfragmented datagram on any LAN.
+    fn full_report() -> RobotReport {
+        RobotReport {
+            health: Some(proto::HealthResult {
+                healthy: false,
+                degraded: false,
+                reason: Some("control loop at 43.9 Hz, below 47.5 Hz".to_owned()),
+                battery: Some(proto::Battery {
+                    volts: 7.62,
+                    percent: 61.0,
+                }),
+                motors: Some(proto::MotorThermal {
+                    hottest: "left_knee".to_owned(),
+                    max_c: 58.0,
+                    mean_c: 44.0,
+                }),
+                cpu_temp_c: Some(71.2),
+                cpu_throttle: Some(proto::CpuThrottle {
+                    level: 1,
+                    max_level: 4,
+                    khz: 1_416_000,
+                    max_khz: 1_800_000,
+                }),
+                bus: proto::BusHealth {
+                    consecutive_errors: 3,
+                    startup_failures: 0,
+                    missing: (10..25).collect(),
+                },
+                ..Default::default()
+            }),
+            posture: Some(Posture {
+                policy: "walk".to_owned(),
+                fallen: true,
+                limp: true,
+                picked_up: false,
+            }),
+            refused: Some(Refusal {
+                method: "robot.do".to_owned(),
+                reason: "the robot is not home yet; try again in a second".to_owned(),
+                ago_ms: 1_234,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_robot_report_round_trips_and_fits_one_datagram() {
+        let r = full_report();
+        let b = r.encode();
+        assert_eq!(&b[..5], b"DKRB\x01");
+        assert!(b.len() < 1200, "{} bytes", b.len());
+        assert_eq!(RobotReport::decode(&b).unwrap(), r);
+        assert!(RobotReport::decode(&Packet::default().encode()).is_err());
+        // An empty report is every field unknown, not zero.
+        let empty = RobotReport::decode(b"DKRB\x01{}").unwrap();
+        assert_eq!(empty, RobotReport::default());
     }
 
     fn sample() -> Packet {

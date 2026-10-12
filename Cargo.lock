@@ -3263,6 +3263,7 @@ dependencies = [
  "duck-ipc-proto",
  "pad-imu",
  "robotd-params",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

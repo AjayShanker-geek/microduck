@@ -10,6 +10,8 @@ duck-ipc-proto = { path = "../duck-ipc-proto" }
 robotd-params = { path = "../robotd-params" }
 pad-imu = { path = "../pad-imu" }
 serde_json.workspace = true
+# `wire::RobotReport`, the robot's health as `netpadd` sends it to the driving client.
+serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

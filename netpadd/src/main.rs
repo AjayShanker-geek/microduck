@@ -11,9 +11,12 @@
 //! shipped unit would turn into "Bluetooth wins" (`restart-order.md` §1).
 //!
 //! One tokio task on a current-thread runtime owns the socket, robotd's connection and the
-//! receiver: no locks, no channels, no work-stealing jitter. `receiver.rs` decides; this file
-//! only waits and writes.
+//! receiver: no locks, no work-stealing jitter. `receiver.rs` decides; this file only waits and
+//! writes. The one exception is the robot's health for the driving client's report, gathered by
+//! `health.rs` on connections of its own so that a slow `robotd` answer never stalls the pad;
+//! this loop only reads the newest snapshot.
 
+mod health;
 mod receiver;
 mod robotd;
 
@@ -177,9 +180,16 @@ async fn serve(
     // A client that was driving and went quiet: the robot sits after a second — `pad_map::loss`,
     // the same as `padd` does for a Bluetooth pad.
     let mut pad_loss = PadLoss::default();
+    // The robot's health, for the driving client's report — read here, gathered elsewhere.
+    let robot_health = health::spawn(&args.socket);
+    let mut report_at = Instant::now() + pad_map::wire::REPORT_EVERY;
+    let mut refused = None::<(&'static str, String, Instant)>;
 
     loop {
-        let mut wake = rx.deadline().map_or(housekeeping, |d| d.min(housekeeping));
+        let mut wake = rx
+            .deadline()
+            .map_or(housekeeping, |d| d.min(housekeeping))
+            .min(report_at);
         if pad_loss.pending() {
             wake = wake.min(Instant::now() + pad_map::loss::PAD_LOST_POLL);
         }
@@ -199,6 +209,8 @@ async fn serve(
                     }
                     match accept {
                         Accept::Connected => {
+                            // The robot's state at once, not up to a second later.
+                            report_at = now;
                             tracing::warn!(%from, "pad client connected — driving");
                             // What it holds was pressed before we saw it. `Gone` already spent a
                             // hold in flight; this covers the first client after a start, which
@@ -272,6 +284,15 @@ async fn serve(
             }
         }
 
+        if now >= report_at {
+            report_at = now + pad_map::wire::REPORT_EVERY;
+            if let Some(peer) = rx.peer() {
+                let report = robot_report(&robot_health.borrow(), refused.as_ref(), now);
+                // As the answers are: never awaited, dropped when it cannot go.
+                let _ = socket.try_send_to(&report.encode(), peer);
+            }
+        }
+
         match rx.poll(now) {
             Step::Idle => {}
             Step::Gone => {
@@ -293,7 +314,10 @@ async fn serve(
                     };
                     match (result, &o) {
                         (Ok(response), Out::Request(call)) => {
-                            pad_map::report(call, response.as_ref())
+                            pad_map::report(call, response.as_ref());
+                            if let Some(reason) = pad_map::refusal(response.as_ref()) {
+                                refused = Some((call.method(), reason, Instant::now()));
+                            }
                         }
                         (Ok(_), Out::Notify(_)) => {}
                         (Err(e), Out::Notify(call) | Out::Request(call)) => {
@@ -366,6 +390,27 @@ impl Answers {
     }
 }
 
+/// The report for the driving client, from the newest health and the last refusal.
+fn robot_report(
+    snapshot: &health::Snapshot,
+    refused: Option<&(&'static str, String, Instant)>,
+    now: Instant,
+) -> pad_map::wire::RobotReport {
+    pad_map::wire::RobotReport {
+        health: snapshot.health.clone(),
+        health_error: snapshot.health_error.clone(),
+        posture: snapshot.posture.clone(),
+        posture_error: snapshot.posture_error.clone(),
+        refused: refused
+            .filter(|(_, _, at)| now.duration_since(*at) < pad_map::wire::REFUSAL_KEPT)
+            .map(|(method, reason, at)| pad_map::wire::Refusal {
+                method: (*method).to_owned(),
+                reason: reason.clone(),
+                ago_ms: now.duration_since(*at).as_millis() as u64,
+            }),
+    }
+}
+
 /// Play one of the robot's sounds, best effort: a cue, not something worth stopping for.
 async fn sound(robot: &mut robotd::Robotd, tag: proto::SoundTag) {
     if let Err(e) = robot.notify(&pad_map::loss::sound(tag)).await {
@@ -391,33 +436,68 @@ mod tests {
     use pad_map::wire::Packet;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    /// A fake robotd: answers every request with an accepted IntentResult, and `robot.mode`
-    /// with walk; collects every method it is sent, with its params.
+    /// A fake robotd: answers every request with an accepted IntentResult, `robot.mode` with
+    /// walk, `robot.health` with a battery, and `robot.subscribe` with a fallen robot's state
+    /// every 100 ms. `robot.do` is refused, so a refusal has something to report. Collects every
+    /// method it is sent, with its params — except the health and state ones, which arrive on
+    /// connections of their own whenever they like.
     async fn fake_robotd(
         path: std::path::PathBuf,
     ) -> tokio::sync::mpsc::UnboundedReceiver<(String, serde_json::Value)> {
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let v: serde_json::Value = serde_json::from_str(&line).unwrap();
-                let method = v["method"].as_str().unwrap_or_default().to_owned();
-                if let Some(id) = v.get("id") {
-                    let result = if method == "robot.mode" {
-                        serde_json::json!({"mode": "walk"})
-                    } else {
-                        serde_json::json!({"accepted": true})
-                    };
-                    let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
-                    write
-                        .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
-                }
-                let _ = tx.send((method, v["params"].clone()));
+            while let Ok((stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        let method = v["method"].as_str().unwrap_or_default().to_owned();
+                        let Some(id) = v.get("id") else {
+                            let _ = tx.send((method, v["params"].clone()));
+                            continue;
+                        };
+                        let result = match method.as_str() {
+                            "robot.mode" => serde_json::json!({"mode": "walk"}),
+                            "robot.health" => serde_json::json!({
+                                "healthy": true, "battery": {"volts": 7.6, "percent": 61.0}
+                            }),
+                            "robot.do" => serde_json::json!({
+                                "accepted": false, "reason": "not home yet"
+                            }),
+                            _ => serde_json::json!({"accepted": true}),
+                        };
+                        let reply =
+                            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                        if write
+                            .write_all(format!("{reply}\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if method == "robot.subscribe" {
+                            loop {
+                                let state = serde_json::json!({"jsonrpc": "2.0",
+                                    "method": "robot.state", "params": {"policy": "stand",
+                                    "safety": {"fallen": true, "limp": false}}});
+                                if write
+                                    .write_all(format!("{state}\n").as_bytes())
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        }
+                        if method != "robot.health" {
+                            let _ = tx.send((method, v["params"].clone()));
+                        }
+                    }
+                });
             }
         });
         rx
@@ -524,13 +604,19 @@ mod tests {
             .collect()
     }
 
+    /// The next status answer within a second, passing over robot reports.
     async fn answer(sock: &tokio::net::UdpSocket) -> Option<pad_map::wire::Status> {
-        let mut b = [0u8; 64];
-        let n = tokio::time::timeout(Duration::from_secs(1), sock.recv(&mut b))
-            .await
-            .ok()?
-            .ok()?;
-        pad_map::wire::Status::decode(&b[..n]).ok()
+        let mut b = [0u8; 2048];
+        let until = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let n = tokio::time::timeout_at(until, sock.recv(&mut b))
+                .await
+                .ok()?
+                .ok()?;
+            if let Ok(s) = pad_map::wire::Status::decode(&b[..n]) {
+                return Some(s);
+            }
+        }
     }
 
     /// Each datagram from the driving client is answered with its seq; a second sender hears
@@ -559,6 +645,50 @@ mod tests {
         let s = answer(&other).await.expect("busy");
         assert_eq!(s.verdict, Verdict::Busy);
         assert_eq!(answer(&other).await, None, "once a second");
+        assert!(!serving.is_finished());
+    }
+
+    /// The driving client is sent the robot's health, posture and last refusal, once a second
+    /// and at once on connecting; the pad loop answers datagrams all the while.
+    #[tokio::test]
+    async fn the_driver_is_sent_the_robots_health_and_what_it_refused() {
+        let (_dir, _seen, serving, client) = start().await;
+        // Let the health and state tasks hear from the robot before the client arrives.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
+        let mut report = None;
+        let until = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut b = [0u8; 2048];
+        while tokio::time::Instant::now() < until {
+            // Keep driving, so the lock holds; press A, which the default config makes a skill.
+            let buttons = if seq % 20 < 10 {
+                pad_map::Buttons::A
+            } else {
+                pad_map::Buttons::NONE
+            };
+            seq = hold(&client, seq, buttons, 33).await;
+            while let Ok(n) = client.try_recv(&mut b) {
+                if let Ok(r) = pad_map::wire::RobotReport::decode(&b[..n])
+                    && r.refused.is_some()
+                {
+                    report = Some(r);
+                }
+            }
+            if report.is_some() {
+                break;
+            }
+        }
+        let r = report.expect("a report carrying the refusal within 3 s");
+        let health = r.health.expect("health");
+        assert!(health.healthy);
+        assert_eq!(health.battery.unwrap().percent, 61.0);
+        let posture = r.posture.expect("posture");
+        assert!(posture.fallen && posture.policy == "stand", "{posture:?}");
+        let refused = r.refused.unwrap();
+        assert_eq!(
+            (refused.method.as_str(), refused.reason.as_str()),
+            ("robot.do", "not home yet")
+        );
         assert!(!serving.is_finished());
     }
 

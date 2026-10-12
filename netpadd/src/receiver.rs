@@ -151,6 +151,11 @@ impl Receiver {
         Some(next.min(timeout))
     }
 
+    /// The client driving the robot, while there is one.
+    pub fn peer(&self) -> Option<SocketAddr> {
+        self.peer
+    }
+
     /// Button bits this build does not know, OR-ed over everything accepted — for one log line.
     pub fn reserved_bits_seen(&self) -> u16 {
         self.reserved_seen
