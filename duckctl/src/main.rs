@@ -1145,8 +1145,8 @@ enum Command {
         /// Most datagrams a second.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(10..=100))]
         hz: u32,
-        /// Flip both sticks' Y before sending, for a pad that drives backwards. gilrs on macOS
-        /// negates every pad's Y, and some pads already report up as positive.
+        /// Flip both sticks' Y before sending, for a pad that drives backwards. On top of the
+        /// flip macOS always gets, which makes it send what `padd` reads on the robot.
         #[arg(long)]
         invert_y: bool,
     },
