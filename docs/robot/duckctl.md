@@ -14,7 +14,44 @@ below.
 
 ## Getting it
 
-Run it from a clone of this repo:
+On any machine with [`uv`](https://docs.astral.sh/uv/) — Linux, macOS or Windows:
+
+```bash
+uvx duckctl --name <robot-name> info
+```
+
+That runs the latest release, downloaded once and cached; nothing is compiled. To have a plain
+`duckctl` on the PATH instead, `uv tool install duckctl` (`uv tool upgrade duckctl` to move it on).
+It is the build of the latest `daemon-v*` release, so it can be behind `main`;
+[`ci-setup.md`](../project/ci-setup.md#duckctl-on-pypi) has how it is published.
+
+For what a branch last built — `main` included — on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+```
+
+It installs what `main` last built to `~/.local/bin`. For another branch's build, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh -s -- udp-pad
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/pollen-robotics/microduck/releases/download/daemon-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+```
+
+```powershell
+Expand-Archive duckctl.zip -DestinationPath .
+```
+
+Every branch push publishes these builds on the `daemon-dev-<branch>` prerelease, beside the daemon. A macOS binary
+downloaded in a browser rather than with the script is quarantined; clear it with
+`xattr -d com.apple.quarantine duckctl`.
+
+With a Rust toolchain, run it from a clone of this repo:
 
 ```bash
 cargo run -q -p duckctl -- --name <robot-name> info
@@ -25,6 +62,14 @@ Or install it once, at the cost of a snapshot that no longer follows the branch:
 ```bash
 cargo install --path duckctl
 ```
+
+Without a clone, the same from GitHub — `main`, or add `--branch <name>` for another:
+
+```bash
+cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
+```
+
+Building needs no system headers: libdbus is compiled in. Then:
 
 ```bash
 duckctl --name <robot-name> info
@@ -622,6 +667,16 @@ the **bumpers**, since the analog triggers are the mouth and the quack.
 Pairing a pad is a different namespace and a different daemon — `pad.pair` and `pad.forget` are
 `configd`'s, reached with `call`. These two are `robotd`'s, because checking a skill name needs
 the list of skills.
+
+## A pad on this machine, over UDP
+
+```bash
+duckctl udp-pad $(duckctl ip)
+```
+
+Reads the first gamepad plugged into this machine and sends its state to a duck whose
+`[netpad] enabled` is true, so no Bluetooth is involved. `--hz` (10 to 100, default 30) is the most it
+sends a second. It is a LAN tool, and [`udp-pad.md`](udp-pad.md) has the setup and the wire format.
 
 ## Anything else — `call`
 

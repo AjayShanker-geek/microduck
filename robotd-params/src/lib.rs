@@ -102,6 +102,8 @@ pub struct Params {
     pub pad_head: PadHeadParams,
     pub pad_body: PadBodyParams,
     pub pad_roller: PadRollerParams,
+    /// The pad over UDP: `netpadd` reads this, and so does `padd`, to know whether to stand down.
+    pub netpad: NetpadParams,
 }
 
 /// Roller commands keep their own bounds and disable strafe by default.
@@ -169,16 +171,17 @@ pub struct PadDriveParams {
 }
 
 impl Default for PadDriveParams {
-    /// The prototype's alpha defaults, which were `padd`'s command-line defaults until they
-    /// moved here.
+    /// Started as the prototype's alpha defaults (`padd`'s old command-line defaults). Since the
+    /// v8 velstand, which tracks yaw commands, forward/back is 0.4 m/s and turning 1.0 rad/s —
+    /// what that policy follows well on the robot.
     fn default() -> Self {
         Self {
-            vx_max: 0.3,
-            vx_min: -0.3,
+            vx_max: 0.4,
+            vx_min: -0.4,
             vy_max: 0.3,
             vy_min: -0.3,
-            vyaw_max: 1.5,
-            vyaw_min: -1.5,
+            vyaw_max: 1.0,
+            vyaw_min: -1.0,
         }
     }
 }
@@ -200,6 +203,36 @@ impl PadDriveParams {
             deflection * max
         } else {
             -deflection * min
+        }
+    }
+}
+
+/// A gamepad over UDP, from a program on the LAN — `netpadd`. `docs/robot/udp-pad.md` owns it.
+///
+/// `enabled` is the switch between the two pad daemons, not a feature flag on one: both units ask
+/// it in `ExecCondition=`, so exactly one of `padd` and `netpadd` runs, and an update's restart of
+/// every shipped unit reaches the same answer as a boot does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NetpadParams {
+    /// UDP is the pad source; `padd` stands down.
+    pub enabled: bool,
+    /// The UDP port, bound on IPv4 0.0.0.0.
+    pub port: u16,
+    /// At most this many intent frames a second reach robotd. A change is sent at once when the
+    /// last send is at least one interval old, otherwise at the next slot — never queued.
+    pub max_hz: u32,
+    /// Silence after which the client counts as gone, and nothing more is sent.
+    pub timeout_ms: u64,
+}
+
+impl Default for NetpadParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 4210,
+            max_hz: 30,
+            timeout_ms: 250,
         }
     }
 }
@@ -244,8 +277,8 @@ impl Default for PadImuHeadControlParams {
 /// needs. It would also put "the button that stops the robot" behind a config key, which is the
 /// one binding worth not being able to lose.
 ///
-/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, the bumpers kick,
-/// and X and Y do nothing until somebody puts a skill there. A named button is rebound; the rest
+/// The defaults keep the pad sparse on purpose: A sits or stands, B picks up, and X, Y and the
+/// bumpers do nothing until somebody puts a skill there (the kicks are still in the set, unbound). A named button is rebound; the rest
 /// stay as they were.
 ///
 /// A name here is not checked against anything at parse time: which skills exist is a property of
@@ -277,8 +310,8 @@ impl Default for PadParams {
             b: "ground_pick".to_owned(),
             x: String::new(),
             y: String::new(),
-            lb: "kick_left".to_owned(),
-            rb: "kick_right".to_owned(),
+            lb: String::new(),
+            rb: String::new(),
         }
     }
 }
@@ -2256,6 +2289,8 @@ pub enum ParamsError {
         min: u32,
         max: u32,
     },
+    #[error("{path}: {reason}")]
+    Netpad { path: String, reason: String },
     #[error(
         "{path}: pad_drive.{axis}_min must be zero or negative and pad_drive.{axis}_max zero or \
          positive, got {min} and {max} — the bounds are signed, so full stick back at 0.2 m/s is \
@@ -2377,6 +2412,29 @@ impl Params {
                     max,
                 });
             }
+        }
+        // Refused rather than clamped, like `control.hz`: the editor should say which value it
+        // was not going to guess at. The floor is 10 because netpadd's 100 ms fallback tick must
+        // not be faster than the cap, and below a few Hz a held stick would outrun robotd's deadman.
+        if !(10..=100).contains(&self.netpad.max_hz) {
+            return Err(ParamsError::Netpad {
+                path: path.display().to_string(),
+                reason: format!("netpad.max_hz ({}) must be 10–100", self.netpad.max_hz),
+            });
+        }
+        // Gated on `enabled` because robotd loads this file too: a board not using netpad must
+        // never fail to load over a section it does not read.
+        if self.netpad.enabled
+            && (self.netpad.timeout_ms == 0 || self.netpad.timeout_ms >= self.safety.deadman_ms)
+        {
+            return Err(ParamsError::Netpad {
+                path: path.display().to_string(),
+                reason: format!(
+                    "netpad.timeout_ms ({}) must be above 0 and below safety.deadman_ms ({}) — \
+                     past the deadman it would re-send a dead client's last stick",
+                    self.netpad.timeout_ms, self.safety.deadman_ms
+                ),
+            });
         }
         let invalid = |key: &str, reason| ParamsError::PadSetting {
             path: path.display().to_string(),
@@ -2907,7 +2965,7 @@ mod tests {
         );
     }
 
-    /// The shipped mapping: A sits, B picks up, the bumpers kick, X and Y are free.
+    /// The shipped mapping: A sits, B picks up, X, Y and the bumpers are free.
     #[test]
     fn the_default_bindings() {
         let pad = super::PadParams::default();
@@ -2915,8 +2973,8 @@ mod tests {
         assert_eq!(pad.b, "ground_pick");
         assert_eq!(pad.x, "");
         assert_eq!(pad.y, "");
-        assert_eq!(pad.lb, "kick_left");
-        assert_eq!(pad.rb, "kick_right");
+        assert_eq!(pad.lb, "");
+        assert_eq!(pad.rb, "");
     }
 
     /// **The D-pad stopped being bindable, and a robot still carrying the old key boots.** It is
@@ -2929,13 +2987,13 @@ mod tests {
     }
 
     /// Binding one button leaves the rest alone — the file is a list of decisions, and rebinding
-    /// X must not silently take the kicks off the bumpers.
+    /// X must not silently take the ground pick off B.
     #[test]
     fn binding_one_button_leaves_the_others() {
         let params: super::Params =
             toml::from_str("[pad]\nx = \"polite-bow\"\n").expect("a pad section");
         assert_eq!(params.pad.x, "polite-bow");
-        assert_eq!(params.pad.lb, "kick_left", "untouched");
+        assert_eq!(params.pad.b, "ground_pick", "untouched");
         assert_eq!(params.pad.a, "sit_toggle", "untouched");
     }
 
@@ -3639,6 +3697,71 @@ mod tests {
         let params = Params::load(&path, true).expect("valid");
         assert_eq!(params.pad_drive.vx_min, 0.0);
         assert_eq!(params.pad_drive.vy_min, -0.1);
+    }
+
+    /// The cap is a divisor and a promise about latency: zero divides by it, and a rate above
+    /// what a pad link carries only spends the robot's socket.
+    #[test]
+    fn netpad_max_hz_outside_ten_to_a_hundred_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0", "9", "101"] {
+            let path = write(dir.path(), &format!("[netpad]\nmax_hz = {bad}\n"));
+            let error = Params::load(&path, true).expect_err("refused").to_string();
+            assert!(error.contains("netpad.max_hz"), "{error}");
+        }
+        for good in [10, 100] {
+            let path = write(dir.path(), &format!("[netpad]\nmax_hz = {good}\n"));
+            assert_eq!(
+                Params::load(&path, true).expect("valid").netpad.max_hz,
+                good
+            );
+        }
+    }
+
+    /// A client timeout at or past the deadman would keep re-sending a dead client's last
+    /// stick until robotd stops the robot anyway — the timeout would protect nothing. Only
+    /// checked when netpad is on: robotd loads this file too, and a board that does not use
+    /// netpad must never fail to load over it.
+    #[test]
+    fn netpad_timeout_must_be_below_the_deadman() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "[netpad]\nenabled = true\ntimeout_ms = 500\n");
+        let error = Params::load(&path, true).expect_err("refused").to_string();
+        assert!(error.contains("netpad.timeout_ms"), "{error}");
+        assert!(error.contains("safety.deadman_ms"), "{error}");
+
+        let path = write(dir.path(), "[netpad]\nenabled = true\ntimeout_ms = 0\n");
+        assert!(
+            Params::load(&path, true).is_err(),
+            "zero is always timed out"
+        );
+
+        let path = write(
+            dir.path(),
+            "[netpad]\nenabled = true\ntimeout_ms = 500\n[safety]\ndeadman_ms = 800\n",
+        );
+        assert_eq!(
+            Params::load(&path, true).expect("valid").netpad.timeout_ms,
+            500
+        );
+
+        let path = write(dir.path(), "[netpad]\nenabled = false\ntimeout_ms = 500\n");
+        assert_eq!(
+            Params::load(&path, true)
+                .expect("off is not checked")
+                .netpad
+                .timeout_ms,
+            500
+        );
+    }
+
+    #[test]
+    fn netpad_defaults_are_off_on_4210_at_30_hz() {
+        let n = NetpadParams::default();
+        assert_eq!(
+            (n.enabled, n.port, n.max_hz, n.timeout_ms),
+            (false, 4210, 30, 250)
+        );
     }
 
     /// On by default, from the release's own copy of the model — a robot nobody configured stops

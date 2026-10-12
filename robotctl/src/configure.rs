@@ -132,6 +132,9 @@ fn apply_for(key: &str) -> Option<Apply> {
         // - `enabled` is read once into `RobotState`, and the reload call is *refused* while it
         //   is false — so the one direction anybody cares about, off to on, cannot be a reload.
         "policy" if name != "mode" && name != "enabled" => Apply::Reload("robotd"),
+        // Read once at startup by both `padd` and `netpadd`, each to decide whether it is the one
+        // to run (`--should-run`). `apply_for` names one daemon; `plan_for_keys` adds `padd`.
+        "netpad" => Apply::Restart("netpadd"),
         "bus" | "control" | "update_gate" | "policy" | "safety" | "chorale" | "theremin"
         | "pickup" | "audio" => Apply::Restart("robotd"),
         _ => return None,
@@ -180,6 +183,10 @@ fn plan_for_keys<'a>(keys: impl Iterator<Item = &'a str>) -> Plan {
         };
         if !list.contains(&apply.unit()) {
             list.push(apply.unit());
+        }
+        // The other half of `[netpad]`: restarting only `netpadd` leaves `padd` on the old answer.
+        if key.starts_with("netpad.") && !plan.restart.contains(&"padd") {
+            plan.restart.push("padd");
         }
     }
     // A daemon that is going down anyway reads the whole file coming back up, so the weaker
@@ -1171,7 +1178,7 @@ mod tests {
                 | "pad_head.head_yaw_max"
                 | "pad_body.roll_max"
                 | "pad_roller.vyaw_max" => "0.5",
-                "pad_drive.vyaw_min" => "-1.0",
+                "pad_drive.vyaw_min" => "-1.2",
                 _ => "walk",
             };
             m.edit(entry(key), value).expect("valid");
@@ -1252,6 +1259,13 @@ mod tests {
             unmapped.is_empty(),
             "nothing says how {unmapped:?} applies — add an arm to `apply_for`"
         );
+    }
+
+    /// Either half of the pad source restarted alone leaves the other on the old answer.
+    #[test]
+    fn a_netpad_change_restarts_both_pad_daemons() {
+        let plan = plan_for_written(&["netpad.enabled".to_string(), "netpad.port".to_string()]);
+        assert_eq!(plan.restart, vec!["netpadd", "padd"]);
     }
 
     /// The offer says which daemon and which of the three answers, in words.

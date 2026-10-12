@@ -545,12 +545,12 @@ mode = "walk"
 # This is what the pad asks for, not a limit on the robot: the policy only follows commands
 # inside the range it was trained on.
 # [pad_drive]
-# vx_max = 0.3
-# vx_min = -0.3
+# vx_max = 0.4
+# vx_min = -0.4
 # vy_max = 0.3
 # vy_min = -0.3
-# vyaw_max = 1.5
-# vyaw_min = -1.5
+# vyaw_max = 1.0
+# vyaw_min = -1.0
 
 # ── Pad joystick axes ──────────────────────────────────────────────────────────────────────
 # Same file as [pad] button bindings; all controller settings reload within a second.
@@ -589,3 +589,14 @@ mode = "walk"
 # vy_max = 0.0
 # vyaw_min = -0.3
 # vyaw_max = 0.3
+
+# ── Pad over UDP ────────────────────────────────────────────────────────────────────────────
+#
+# Read by `padd` and `netpadd`. On, `netpadd` takes gamepad state from a program on the LAN —
+# `duckctl udp-pad`, or your own; docs/robot/udp-pad.md has the wire format — and `padd` stands
+# down. Restart both after changing it: `sudo systemctl restart padd netpadd`.
+# [netpad]
+# enabled = false
+# port = 4210
+# max_hz = 30          # intent frames a second to robotd, at most, 10–100
+# timeout_ms = 250     # silence that counts as the client gone; below [safety] deadman_ms

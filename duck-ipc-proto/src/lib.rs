@@ -3808,6 +3808,17 @@ pub struct Battery {
     pub percent: f64,
 }
 
+impl Battery {
+    /// The percentages a reading is coloured at, by every client that shows one.
+    ///
+    /// Not display taste: 0% is `duck_control::model::BATTERY_EMPTY_V`, which is the voltage at
+    /// which `robotd` sits the robot down and cuts power. The percentage is a countdown to that,
+    /// so the last fifth of it is worth seeing from across a room. Here rather than in a client,
+    /// so `robotctl monitor` and `duckctl udp-pad` cannot disagree about the same pack.
+    pub const LOW_PCT: f64 = 30.0;
+    pub const CRITICAL_PCT: f64 = 15.0;
+}
+
 /// Answer to a discrete intent — [`Call::RobotStop`], [`Call::RobotEnable`].
 ///
 /// `accepted: false` is a normal outcome, not an error: safety may refuse to enable a
@@ -5555,7 +5566,8 @@ macro_rules! log_startup_identity {
 /// "monotonic" means. Nanoseconds. `monotonic` is `CLOCK_MONOTONIC` — what
 /// [`RobotState::t_ns`] and [`TofFrame::t_ns`] carry; `realtime` is `CLOCK_REALTIME`, the
 /// clock RTCP sender reports are stated in, read together in `media.video` so a peer can
-/// relate the two.
+/// relate the two. Unix only: no daemon runs anywhere else.
+#[cfg(unix)]
 pub mod clock {
     fn read(clock: libc::clockid_t) -> u64 {
         let mut ts = libc::timespec {
