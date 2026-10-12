@@ -5877,29 +5877,29 @@ mod tests {
 
         let off = bind_pad_request(
             &proto::PadBindParams {
-                button: "lb".to_owned(),
+                button: "b".to_owned(),
                 skill: Some(String::new()),
             },
             &state,
         );
         assert!(off.accepted, "{off:?}");
         assert_eq!(
-            params::edit::pad_bindings(&state.config_path).unwrap().lb,
+            params::edit::pad_bindings(&state.config_path).unwrap().b,
             "",
             "switched off"
         );
 
         let back = bind_pad_request(
             &proto::PadBindParams {
-                button: "lb".to_owned(),
+                button: "b".to_owned(),
                 skill: None,
             },
             &state,
         );
         assert!(back.accepted, "{back:?}");
         assert_eq!(
-            params::edit::pad_bindings(&state.config_path).unwrap().lb,
-            "kick_left",
+            params::edit::pad_bindings(&state.config_path).unwrap().b,
+            "ground_pick",
             "back to what the robot ships with"
         );
     }
@@ -5911,8 +5911,8 @@ mod tests {
         let (_dir, state) = state_over("");
         let result = bind_pad_request(
             &proto::PadBindParams {
-                button: "lb".to_owned(),
-                skill: Some("kick_left".to_owned()),
+                button: "b".to_owned(),
+                skill: Some("ground_pick".to_owned()),
             },
             &state,
         );

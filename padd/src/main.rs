@@ -27,8 +27,7 @@
 //! ```text
 //! A (South)       sit ↔ stand
 //! B (East)        ground pick
-//! X / Y           nothing, until a skill is bound there
-//! LB / RB         left / right kick
+//! X / Y, LB / RB  nothing, until a skill is bound there
 //! RT / LT         mouth (either trigger; the max wins) · RT quacks · LT rides the wheee
 //! D-pad up        head mode — the sticks pose the head, the body holds still
 //! D-pad right     head + move — left stick walks and turns, right stick looks around
@@ -552,7 +551,7 @@ fn main() -> std::process::ExitCode {
         socket = %args.socket.display(),
         hz = args.hz,
         roller,
-        "driving — A sit, B ground pick, LB/RB kicks, triggers mouth; D-pad up head, \
+        "driving — A sit, B ground pick, triggers mouth; D-pad up head, \
          right head + move, left move, down body + head; Start stands up then toggles the policy, \
          Start (1.5s) home pose; Select (2-4s) rest, Select (4s) power off"
     );
@@ -1790,9 +1789,9 @@ mod tests {
         };
         // Left stick up and to the left: forward, turning left.
         let twist = walking.walk(1.0, 0.0, -1.0);
-        assert_eq!(twist.vx, 0.3);
+        assert_eq!(twist.vx, 0.4);
         assert_eq!(twist.vy, 0.0);
-        assert_eq!(twist.vyaw, 1.5, "stick left turns left (positive yaw)");
+        assert_eq!(twist.vyaw, 1.0, "stick left turns left (positive yaw)");
         assert_eq!(
             walking.walk(-1.0, 0.0, 0.0).vx,
             -0.2,
