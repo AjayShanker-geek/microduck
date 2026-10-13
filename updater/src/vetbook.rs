@@ -44,8 +44,11 @@ type Result<T> = std::result::Result<T, Error>;
 /// image is the card rather than Hugging Face's page around it.
 pub const SPACE_URL: &str = "https://pollen-robotics-microduck-vetbook.hf.space";
 
-/// The cards a share can draw, as the Space names them.
-pub const CARDS: [&str; 3] = ["notebook", "purikura", "profile"];
+/// The cards a share can draw, as the Space names them. The Space draws any of its own for a name
+/// it does not know, so an older robot drawing from a shorter list still gets a card.
+pub const CARDS: [&str; 7] = [
+    "notebook", "purikura", "profile", "receipt", "passport", "gameboy", "polaroid",
+];
 
 /// How long `robotd` and `configd` each get to answer. Both answer from memory.
 const ASK_TIMEOUT: Duration = Duration::from_secs(5);

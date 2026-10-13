@@ -1,0 +1,55 @@
+{% extends "card.html" %}
+{% import "macros.html" as m %}
+{% block style %}
+/* gameboy: the console sideways — its four-green screen holds the duck's pixel head and a stat
+   screen, the buttons sit to the right. The pixel head is `robotctl vetbook`'s own. */
+.gameboy { --shell: #d9d4c7; --shell2: #c5bfb1; --label: #5a4fa0; background: #8bac0f; }
+.gameboy.pal1 { --shell: #f2c6d2; --shell2: #e3a9ba; --label: #a03a5a; }
+.gameboy.pal2 { --shell: #b8e0d2; --shell2: #98ccbb; --label: #2f7a6a; }
+.gameboy.pal3 { --shell: #f6d77a; --shell2: #e8c25a; --label: #8a5a10; }
+.gameboy::before { content: ""; position: absolute; inset: 0; background: radial-gradient(#0f380f22 2px, transparent 2.5px) 0 0 / 22px 22px; }
+.gameboy .shell { position: absolute; left: 30px; top: 22px; right: 30px; bottom: 22px; background: linear-gradient(180deg, var(--shell), var(--shell2)); border-radius: 28px 28px 90px 28px; box-shadow: 0 14px 30px #0004, inset 0 -6px 0 #0002; }
+.gameboy .bezel { position: absolute; left: 60px; top: 44px; width: 790px; height: 500px; background: #5d5d6e; border-radius: 18px 18px 60px 18px; padding: 40px 54px 30px; }
+.gameboy .bezel small { position: absolute; left: 54px; top: 12px; font: 400 16px "Silkscreen"; color: #c8c8d6; letter-spacing: .14em; }
+.gameboy .led { position: absolute; left: 18px; top: 150px; width: 14px; height: 14px; border-radius: 50%; background: #e23a4e; box-shadow: 0 0 10px #e23a4e; }
+.gameboy .screen { position: relative; width: 100%; height: 100%; background: #9bbc0f; border-radius: 6px; box-shadow: inset 0 0 0 4px #8bac0f; overflow: hidden; color: #0f380f; font-family: "VT323", monospace; }
+.gameboy .screen::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(0deg, #0f380f0d 0 2px, transparent 2px 4px); }
+.gameboy .head { position: absolute; left: 26px; top: 58px; width: 252px; }
+.gameboy .name { position: absolute; left: 22px; right: 22px; top: 6px; font: 700 34px "Silkscreen"; white-space: nowrap; }
+.gameboy .lv { position: absolute; right: 22px; top: 10px; font: 400 30px "VT323"; }
+.gameboy .stats { position: absolute; left: 300px; right: 20px; top: 54px; font-size: 30px; line-height: 1.12; }
+.gameboy .stats div { display: flex; justify-content: space-between; white-space: nowrap; }
+.gameboy .msg { position: absolute; left: 14px; right: 14px; bottom: 12px; border: 4px solid #0f380f; background: #8bac0f; padding: 6px 12px; font-size: 28px; line-height: 1.05; }
+.gameboy .msg::after { content: "▼"; position: absolute; right: 10px; bottom: 2px; font-size: 18px; }
+.gameboy .brand { position: absolute; left: 76px; bottom: 34px; font: 700 26px "Silkscreen"; color: var(--label); letter-spacing: .05em; }
+.gameboy .dpad { position: absolute; right: 190px; top: 220px; width: 120px; height: 120px; }
+.gameboy .dpad::before, .gameboy .dpad::after { content: ""; position: absolute; background: #2b2b33; border-radius: 6px; }
+.gameboy .dpad::before { left: 40px; top: 0; width: 40px; height: 120px; }
+.gameboy .dpad::after { left: 0; top: 40px; width: 120px; height: 40px; }
+.gameboy .btn { position: absolute; width: 62px; height: 62px; border-radius: 50%; background: #a0285a; box-shadow: 0 4px 0 #6a1a3a; color: #fff; display: grid; place-items: center; font: 700 20px "Silkscreen"; }
+.gameboy .ss { position: absolute; width: 56px; height: 14px; background: #8a8796; border-radius: 8px; transform: rotate(-25deg); }
+{% endblock %}
+{% block card %}
+  <div class="shell"></div>
+  <div class="bezel"><small>DOT MATRIX WITH STEREO SOUND</small><div class="led"></div>
+    <div class="screen">
+      <div class="name fit" style="right:120px">{{ c.robot|upper }}</div>
+      <div class="lv">LV {{ [1, (c.awake_hours / 10)|int + 1]|max }}</div>
+      <img class="pix head" src="{{ pixel_gb }}" alt="">
+      <div class="stats">
+        <div><span>WALK</span><span>{{ c.walked }}{{ c.walked_unit|upper }}</span></div>
+        <div><span>HUGS</span><span>{{ c.cuddles }}</span></div>
+        <div><span>PETS</span><span>{{ c.pets }}</span></div>
+        <div><span>FALLS</span><span>{{ c.falls }}</span></div>
+        <div><span>SPINS</span><span>{{ c.spins }}</span></div>
+        <div><span>BADGES</span><span>{{ c.badges|length }}</span></div>
+      </div>
+      <div class="msg">{{ c.status.title|upper }} {{ c.facts[0]|upper if c.facts else c.status.line|upper }}</div>
+    </div>
+  </div>
+  <div class="dpad"></div>
+  <div class="btn" style="right:120px;top:400px">B</div>
+  <div class="btn" style="right:40px;top:360px">A</div>
+  <div class="ss" style="right:250px;top:500px"></div><div class="ss" style="right:170px;top:500px"></div>
+  <div class="brand">MICRODUCK BOY</div>
+{% endblock %}

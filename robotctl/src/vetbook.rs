@@ -195,11 +195,12 @@ fn robot_name(config_socket: &Path) -> String {
 enum Tab {
     Life,
     Motors,
+    Records,
     Diary,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::Life, Tab::Motors, Tab::Diary];
+    const ALL: [Tab; 4] = [Tab::Life, Tab::Motors, Tab::Records, Tab::Diary];
 
     fn index(self) -> usize {
         Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
@@ -323,7 +324,8 @@ fn live(
                 }
                 KeyCode::Char('1') => page.tab = Tab::Life,
                 KeyCode::Char('2') => page.tab = Tab::Motors,
-                KeyCode::Char('3') => page.tab = Tab::Diary,
+                KeyCode::Char('3') => page.tab = Tab::Records,
+                KeyCode::Char('4') => page.tab = Tab::Diary,
                 KeyCode::Down | KeyCode::Char('j') => match page.tab {
                     Tab::Motors => {
                         let i = page.motors.selected().unwrap_or(0);
@@ -331,7 +333,7 @@ fn live(
                             .select(Some((i + 1).min(rows.saturating_sub(1))));
                     }
                     Tab::Diary => page.diary_scroll = page.diary_scroll.saturating_add(1),
-                    Tab::Life => {}
+                    Tab::Life | Tab::Records => {}
                 },
                 KeyCode::Up | KeyCode::Char('k') => match page.tab {
                     Tab::Motors => {
@@ -339,7 +341,7 @@ fn live(
                         page.motors.select(Some(i.saturating_sub(1)));
                     }
                     Tab::Diary => page.diary_scroll = page.diary_scroll.saturating_sub(1),
-                    Tab::Life => {}
+                    Tab::Life | Tab::Records => {}
                 },
                 KeyCode::Char('r') => fetched = Instant::now() - REFRESH,
                 KeyCode::Char('n') => {
@@ -370,6 +372,9 @@ fn live(
     }
 }
 
+/// A panel of the Records tab: its title, its colour, and its lines as (label, value).
+type RecordGroup<'a> = (&'a str, Color, Vec<(&'a str, String)>);
+
 impl Page {
     fn render(&mut self, area: Rect, buf: &mut Buffer) {
         let [header, tabs, body, footer] = Layout::vertical([
@@ -381,7 +386,7 @@ impl Page {
         .areas(area);
         self.render_header(header, buf);
 
-        let titles = ["♥ Life", "⚙ Motors", "✎ Diary"]
+        let titles = ["♥ Life", "⚙ Motors", "★ Records", "✎ Diary"]
             .iter()
             .enumerate()
             .map(|(i, t)| Line::from(format!(" {} {t} ", i + 1)));
@@ -395,6 +400,7 @@ impl Page {
         match self.tab {
             Tab::Life => self.render_life(body, buf),
             Tab::Motors => self.render_motors(body, buf),
+            Tab::Records => self.render_records(body, buf),
             Tab::Diary => self.render_diary(body, buf),
         }
 
@@ -956,6 +962,139 @@ impl Page {
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .render(inner, buf);
+    }
+
+    /// Personal records, by the sensor that set them: what the shared card's badges are made of.
+    fn render_records(&self, area: Rect, buf: &mut Buffer) {
+        use proto::vetbook::key;
+        let life = &self.book.life;
+        let t = |k: &str| life.tallies.get(k).copied().unwrap_or(0.0);
+        let hi = |k: &str| life.highs.get(k).copied().unwrap_or(0.0);
+        let lo = |k: &str| life.lows.get(k).copied();
+        let groups: [RecordGroup; 6] = [
+            (
+                "body · IMU",
+                POND,
+                vec![
+                    ("fastest spin", format!("{:.0} °/s", hi(key::SPIN_DPS))),
+                    (
+                        "steepest tilt survived",
+                        format!("{:.0}°", hi(key::TILT_SURVIVED_DEG)),
+                    ),
+                    ("upside down", hours(t(key::UPSIDE_DOWN_S))),
+                ],
+            ),
+            (
+                "feet · odometry",
+                DUCK,
+                vec![
+                    (
+                        "top speed",
+                        format!("{:.2} km/h", hi(key::TOP_SPEED_MPS) * 3.6),
+                    ),
+                    (
+                        "longest walk, no fall",
+                        format!("{:.0} m", hi(key::WALK_STREAK_M)),
+                    ),
+                    (
+                        "spins",
+                        format!("{:.0}", life.turned_rad / std::f64::consts::TAU),
+                    ),
+                ],
+            ),
+            (
+                "servos",
+                BEAK,
+                vec![
+                    ("peak current", format!("{:.2} A", hi(key::PEAK_CURRENT_A))),
+                    (
+                        "fastest joint",
+                        format!("{:.0} °/s", hi(key::JOINT_SPEED_DPS)),
+                    ),
+                    ("gaits tried", format!("{:.0}", t(key::GAIT_CHANGES))),
+                ],
+            ),
+            (
+                "voice, beak, light",
+                BLUSH,
+                vec![
+                    ("sounds played", format!("{:.0}", t(key::SOUNDS))),
+                    ("beak flaps", format!("{:.0}", t(key::BEAK_FLAPS))),
+                    (
+                        "flashlight",
+                        format!(
+                            "{} · {:.0}× on",
+                            hours(t(key::FLASHLIGHT_S)),
+                            t(key::FLASHLIGHT_ON)
+                        ),
+                    ),
+                ],
+            ),
+            (
+                "camera · depth",
+                LILAC,
+                vec![
+                    ("photos", format!("{:.0}", t(key::PHOTOS))),
+                    (
+                        "video streamed",
+                        format!(
+                            "{} · {:.0} visits",
+                            hours(t(key::VIDEO_S)),
+                            t(key::REMOTE_VISITS)
+                        ),
+                    ),
+                    ("laser sweep", format!("{:.0} m²", t(key::LASER_M2))),
+                    (
+                        "nearest · farthest",
+                        format!(
+                            "{} · {:.0} mm",
+                            lo(key::CLOSEST_MM).map_or("—".into(), |v| format!("{v:.0}")),
+                            hi(key::FARTHEST_MM)
+                        ),
+                    ),
+                ],
+            ),
+            (
+                "power · board",
+                LEAF,
+                vec![
+                    ("longest on one charge", hours(hi(key::ON_ONE_CHARGE_S))),
+                    ("throttled", hours(t(key::THROTTLED_S))),
+                    ("hottest board", format!("{:.0} °C", life.hottest_cpu_c)),
+                ],
+            ),
+        ];
+        let cols = if area.width >= 110 { 3 } else { 2 };
+        let rows = groups.len().div_ceil(cols);
+        let row_areas = Layout::vertical(vec![Constraint::Length(7); rows]).split(area);
+        for (r, row_area) in row_areas.iter().enumerate() {
+            let cells =
+                Layout::horizontal(vec![Constraint::Ratio(1, cols as u32); cols]).split(*row_area);
+            for (c, cell) in cells.iter().enumerate() {
+                let Some((title, colour, lines)) = groups.get(r * cols + c) else {
+                    continue;
+                };
+                let block = Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(Color::Indexed(240)))
+                    .title(Span::styled(
+                        format!(" {title} "),
+                        Style::new().fg(*colour).bold(),
+                    ));
+                let inner = block.inner(*cell);
+                block.render(*cell, buf);
+                let text: Vec<Line> = lines
+                    .iter()
+                    .map(|(k, v)| {
+                        Line::from(vec![
+                            Span::styled(format!("{k:<24}"), Style::new().fg(DIM)),
+                            Span::styled(v.clone(), Style::new().bold()),
+                        ])
+                    })
+                    .collect();
+                Paragraph::new(text).render(inner, buf);
+            }
+        }
     }
 
     fn render_diary(&self, area: Rect, buf: &mut Buffer) {
@@ -1655,6 +1794,23 @@ mod tests {
         // something truncated on the way.
         let again = qrcode::QrCode::new(url.as_bytes()).unwrap();
         assert_eq!(again.width() + 4, modules.len());
+    }
+
+    #[test]
+    fn the_records_tab_names_every_sensor() {
+        for width in [80, 140] {
+            let page = draw(Tab::Records, width);
+            for group in [
+                "body · IMU",
+                "feet · odometry",
+                "servos",
+                "camera · depth",
+                "power · board",
+            ] {
+                assert!(page.contains(group), "{group} missing at {width}:\n{page}");
+            }
+            assert!(page.contains("fastest spin"));
+        }
     }
 
     #[test]
