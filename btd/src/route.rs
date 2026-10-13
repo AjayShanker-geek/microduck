@@ -359,6 +359,11 @@ fn permits(call: &proto::Call) -> bool {
         // Static geometry, read-only; the same class of read as the one above.
         RobotModel => true,
 
+        // The vet book: the robot's lifetime record, read once when somebody opens the page — the
+        // app is its obvious reader. A note is a dated line of text from a PIN-bonded phone in the
+        // room; it moves nothing and cannot push a servo's history out of the book.
+        RobotVetbook | RobotVetbookNote(_) => true,
+
         // Re-reading the slots after something else edited the config. Same blast radius as
         // `robot.loadPolicy` and the same answer, and a client that can load wants this for the
         // case where the file changed underneath it.

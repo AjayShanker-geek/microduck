@@ -498,6 +498,35 @@ pause while the robot is walking normally (the walk freezes for a moment, then r
 that stays paused after being put down. `pause_threshold` and `resume_threshold` in the
 same section move the two edges; the design is [`robotd-design.md` §2.4.2](../design/robotd-design.md).
 
+### The vet book
+
+The duck's whole life, in numbers — kept by `robotd` from its first start, through every update,
+until the board is reflashed:
+
+```
+robotctl vetbook                         # the live page: life, motors, diary (q quits, ←/→ tabs)
+robotctl vetbook | less                  # the same as plain text
+robotctl vetbook --json                  # the book as robot.vetbook answers it
+robotctl vetbook note reglued the beak   # a dated line in the diary
+```
+
+**Life**: hours awake, with torque, walking, standing, sitting, held in hands and on the floor;
+metres walked (contact odometry, only while the gait drives); falls, soft landings, pickups,
+pets, ground picks, sit-downs, stand-ups, songs and every skill by name; boots, updates and
+guessed charges; the hottest servo and board and the battery's range. **Motors**: per joint, the
+torque hours, shaft travel, current carried and heat of the servo in it now; every
+overload/overheat/shock/encoder/voltage trip it has latched; and how long the servos before it
+lasted. **Diary**: updates, servo swaps, charges and notes, dated.
+
+**A servo swap writes itself down.** When `robotd` adopts a factory-fresh servo (id 1, 57600 baud)
+into a missing joint, it retires the old servo's record with what it did and starts the new one
+at zero. A servo that went in already set to the joint's id is invisible — Dynamixels carry no
+serial number — and carries on the old one's record.
+
+The book is `/var/lib/robot/vetbook.json`, saved once a minute and when `robotd` stops, so
+switching off at the battery loses at most a minute. `--fake` and `--sim` keep it in memory
+unless `robotd --vetbook <file>` names one.
+
 ### Changing joystick mappings
 
 Run `sudo robotctl configure`, then search for `pad_axes` to select axes, directions and gains.
