@@ -274,7 +274,10 @@ impl IdleHead {
             p.glance_pitch * reach * self.rng.between(-1.0, 1.0),
             tilt,
             p.glance_neck * reach * self.rng.between(-1.0, 1.0),
-            p.glance_mouth * reach * self.rng.unit(),
+            // Not scaled by `reach`, and never less than half: the first seventh of the mouth’s
+            // travel only eases off how hard it is held shut, so a smaller opening is no
+            // opening at all.
+            p.glance_mouth * self.rng.between(0.5, 1.0),
         ]
     }
 }

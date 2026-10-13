@@ -881,7 +881,9 @@ pub struct IdleParams {
     /// the whole head shifts rather than only the face turning.
     pub glance_neck: f64,
     /// How far a look opens the beak at most, 0..1 — eased with the glance, so the mouth moves
-    /// a little as the robot looks about. Zero keeps it shut but for the yawns.
+    /// a little as the robot looks about; each look opens it between half and all of this.
+    /// Below about 0.15 it does not visibly open: closed is held a few degrees past shut.
+    /// Zero keeps it shut but for the yawns.
     pub glance_mouth: f64,
     /// The curious sideways tilt a glance sometimes comes with.
     pub tilt_roll: f64,
@@ -935,7 +937,7 @@ impl Default for IdleParams {
             glance_yaw: 0.6,
             glance_pitch: 0.2,
             glance_neck: 0.15,
-            glance_mouth: 0.15,
+            glance_mouth: 0.4,
             tilt_roll: 0.3,
             tilt_chance: 0.25,
             centre_chance: 0.25,
