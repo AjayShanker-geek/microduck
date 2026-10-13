@@ -935,9 +935,14 @@ pub const REGISTRY: &[Entry] = &[
         "Most intent frames a second sent to robotd, 10–100",
     ),
     entry(
+        "netpad.stale_ms",
+        Kind::Integer,
+        "Nothing new from the UDP client for this long stops the robot — below safety.deadman_ms",
+    ),
+    entry(
         "netpad.timeout_ms",
         Kind::Integer,
-        "Silence after which the UDP client counts as gone — below safety.deadman_ms",
+        "Silence after which the UDP client counts as gone — at least stale_ms",
     ),
 ];
 
