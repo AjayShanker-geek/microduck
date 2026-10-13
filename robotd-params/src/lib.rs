@@ -191,7 +191,13 @@ pub struct NetpadParams {
     /// At most this many intent frames a second reach robotd. A change is sent at once when the
     /// last send is at least one interval old, otherwise at the next slot — never queued.
     pub max_hz: u32,
-    /// Silence after which the client counts as gone, and nothing more is sent.
+    /// Nothing new for this long and the robot is stopped where it stands, the client kept: a blip
+    /// on Wi-Fi costs a stop, not the session. Also how late a datagram may be delivered and still
+    /// drive. Below `[safety] deadman_ms`, or a stalled client's last stick would keep the deadman
+    /// fed.
+    pub stale_ms: u64,
+    /// Silence after which the client counts as gone: the lock released, holds reset, and a second
+    /// later the robot sits.
     pub timeout_ms: u64,
 }
 
@@ -201,7 +207,8 @@ impl Default for NetpadParams {
             enabled: false,
             port: 4210,
             max_hz: 30,
-            timeout_ms: 250,
+            stale_ms: 300,
+            timeout_ms: 1000,
         }
     }
 }
@@ -2393,17 +2400,29 @@ impl Params {
         }
         // Gated on `enabled` because robotd loads this file too: a board not using netpad must
         // never fail to load over a section it does not read.
-        if self.netpad.enabled
-            && (self.netpad.timeout_ms == 0 || self.netpad.timeout_ms >= self.safety.deadman_ms)
-        {
-            return Err(ParamsError::Netpad {
-                path: path.display().to_string(),
-                reason: format!(
-                    "netpad.timeout_ms ({}) must be above 0 and below safety.deadman_ms ({}) — \
-                     past the deadman it would re-send a dead client's last stick",
-                    self.netpad.timeout_ms, self.safety.deadman_ms
-                ),
-            });
+        if self.netpad.enabled {
+            let n = &self.netpad;
+            let reason = if n.stale_ms == 0 || n.stale_ms >= self.safety.deadman_ms {
+                Some(format!(
+                    "netpad.stale_ms ({}) must be above 0 and below safety.deadman_ms ({}) — \
+                     past the deadman it would keep a stalled client's last stick going",
+                    n.stale_ms, self.safety.deadman_ms
+                ))
+            } else if n.timeout_ms < n.stale_ms {
+                Some(format!(
+                    "netpad.timeout_ms ({}) must be at least netpad.stale_ms ({}) — the client is \
+                     stopped before it counts as gone",
+                    n.timeout_ms, n.stale_ms
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(ParamsError::Netpad {
+                    path: path.display().to_string(),
+                    reason,
+                });
+            }
         }
         let invalid = |key: &str, reason| ParamsError::PadSetting {
             path: path.display().to_string(),
@@ -3691,39 +3710,41 @@ mod tests {
         }
     }
 
-    /// A client timeout at or past the deadman would keep re-sending a dead client's last
-    /// stick until robotd stops the robot anyway — the timeout would protect nothing. Only
-    /// checked when netpad is on: robotd loads this file too, and a board that does not use
-    /// netpad must never fail to load over it.
+    /// A stale limit at or past the deadman would keep re-sending a stalled client's last stick
+    /// until robotd stops the robot anyway — it would protect nothing. The client counts as gone
+    /// no sooner than it is stopped. Only checked when netpad is on: robotd loads this file too,
+    /// and a board that does not use netpad must never fail to load over it.
     #[test]
-    fn netpad_timeout_must_be_below_the_deadman() {
+    fn netpad_stale_must_be_below_the_deadman_and_the_timeout_not_below_it() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "[netpad]\nenabled = true\ntimeout_ms = 500\n");
+        let path = write(dir.path(), "[netpad]\nenabled = true\nstale_ms = 500\n");
         let error = Params::load(&path, true).expect_err("refused").to_string();
-        assert!(error.contains("netpad.timeout_ms"), "{error}");
+        assert!(error.contains("netpad.stale_ms"), "{error}");
         assert!(error.contains("safety.deadman_ms"), "{error}");
 
-        let path = write(dir.path(), "[netpad]\nenabled = true\ntimeout_ms = 0\n");
-        assert!(
-            Params::load(&path, true).is_err(),
-            "zero is always timed out"
-        );
+        let path = write(dir.path(), "[netpad]\nenabled = true\nstale_ms = 0\n");
+        assert!(Params::load(&path, true).is_err(), "zero is always stale");
 
         let path = write(
             dir.path(),
-            "[netpad]\nenabled = true\ntimeout_ms = 500\n[safety]\ndeadman_ms = 800\n",
+            "[netpad]\nenabled = true\nstale_ms = 300\ntimeout_ms = 200\n",
         );
-        assert_eq!(
-            Params::load(&path, true).expect("valid").netpad.timeout_ms,
-            500
-        );
+        let error = Params::load(&path, true).expect_err("refused").to_string();
+        assert!(error.contains("netpad.timeout_ms"), "{error}");
 
-        let path = write(dir.path(), "[netpad]\nenabled = false\ntimeout_ms = 500\n");
+        let path = write(
+            dir.path(),
+            "[netpad]\nenabled = true\nstale_ms = 500\ntimeout_ms = 5000\n[safety]\ndeadman_ms = 800\n",
+        );
+        let n = Params::load(&path, true).expect("valid").netpad;
+        assert_eq!((n.stale_ms, n.timeout_ms), (500, 5000));
+
+        let path = write(dir.path(), "[netpad]\nenabled = false\nstale_ms = 500\n");
         assert_eq!(
             Params::load(&path, true)
                 .expect("off is not checked")
                 .netpad
-                .timeout_ms,
+                .stale_ms,
             500
         );
     }
@@ -3732,8 +3753,8 @@ mod tests {
     fn netpad_defaults_are_off_on_4210_at_30_hz() {
         let n = NetpadParams::default();
         assert_eq!(
-            (n.enabled, n.port, n.max_hz, n.timeout_ms),
-            (false, 4210, 30, 250)
+            (n.enabled, n.port, n.max_hz, n.stale_ms, n.timeout_ms),
+            (false, 4210, 30, 300, 1000)
         );
     }
 

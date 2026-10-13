@@ -62,14 +62,15 @@ To go back to Bluetooth, set `netpad.enabled = false` (or reset the key) and res
 units. A configuration that cannot be read counts as off, so a damaged file never leaves somebody
 without a pad.
 
-The other three keys are all read at start, so they too take a restart of both units:
+The other four keys are all read at start, so they too take a restart of both units:
 
 | key | default | what it is |
 |---|---|---|
 | `enabled` | `false` | UDP is the pad source, and `padd` stands down |
 | `port` | `4210` | the UDP port, bound on IPv4 `0.0.0.0` |
 | `max_hz` | `30` | the most intent frames a second sent to the robot, 10 to 100; outside that is refused |
-| `timeout_ms` | `250` | the silence after which the client counts as gone; it must be below `[safety] deadman_ms`, or the configuration is refused and the error names both keys |
+| `stale_ms` | `300` | nothing new for this long and the robot stops where it stands, the client kept; also how late a datagram may arrive and still drive. It must be below `[safety] deadman_ms`, or the configuration is refused and the error names both keys |
+| `timeout_ms` | `1000` | the silence after which the client counts as gone; at least `stale_ms`, or the configuration is refused |
 
 ## Driving from a laptop
 
@@ -89,7 +90,7 @@ address (`duck.local:4210`) overrides the default, and `--hz` (10 to 100, defaul
 will send a second. It sends the moment anything changes and otherwise a keepalive every `1/hz`, so
 the robot can tell a still pad from a gone one. With no pad on the laptop it sends nothing, and the
 robot times it out as it would a Bluetooth pad that went away. `Ctrl-C` ends it: the robot stops
-once `robotd`'s deadman runs out, and sits down a second after that.
+after `stale_ms`, and sits down a second after `timeout_ms`.
 
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
 before sending.
@@ -189,7 +190,7 @@ hold(5, buttons=START); hold(60)              # tap Start: robot.init, and 2 s t
 hold(5, buttons=START); hold(10)              # tap Start again: the policy on
 hold(90, ly=32767)                            # 3 s forward
 s.sendto(pkt((seq - 50) % 2**32, ly=-32767), DUCK)  # stale: dropped, never walks backwards
-# then silence: robotd's deadman stops the robot, and it sits down a second later
+# then silence: the robot stops after stale_ms, and sits down a second after timeout_ms
 ```
 
 The rules a sender follows, and why:
@@ -269,7 +270,7 @@ added to `robot.health` reaches this report without a change to the format.
   press and release that both land between two slots still fire, because buttons are compared per
   datagram, not per slot.
 - **A datagram delivered late is dropped.** Wi-Fi can hold datagrams for seconds and release them
-  at once, in order, so each is still the newest. One that took more than `timeout_ms` longer than
+  at once, in order, so each is still the newest. One that took more than `stale_ms` longer than
   the fastest delivery seen from the same stream is dropped and counted as stale, and buttons
   pressed in it fire nothing: it says what the pad did, not what it does. The count is logged at
   most once every 10 seconds. A stream is the same sender continuing its `seq`, across a silence
@@ -281,12 +282,18 @@ added to `robot.health` reaches this report without a change to the format.
 - **How late datagrams arrive is logged.** Every 10 seconds while a client drives, `netpadd` logs
   a `link:` line: the p50, p99 and largest delay above the stream's fastest delivery, in ms, and how
   many were dropped as late. A few ms is a healthy link. Hundreds with nothing dropped is a lag
-  under `timeout_ms`; `late` above 0 is a backlog or a lag beyond it.
+  under `stale_ms`; `late` above 0 is a backlog or a lag beyond it. `stalls` is how many times
+  the robot was stopped for nothing new in `stale_ms`.
 - **The first sender holds it.** The robot locks to the address of the first datagram it accepts and
   drops datagrams from any other address until that one has been silent for `timeout_ms`, so two
   people driving honestly cannot fight over one duck. It is not protection: see [trust](#trust).
-- **Silence is the client gone.** After `timeout_ms` with nothing accepted, `netpadd` sends no more
-  stick commands, and `robotd`'s deadman (`[safety] deadman_ms`) stops the walking. In-flight holds
+- **A short silence stops the robot.** After `stale_ms` with nothing accepted, `netpadd` stops the
+  walking at once, leaves the head and the body pose where they are, and sends nothing more until
+  the client is heard again — not the last stick again, which would keep `robotd`'s deadman fed on
+  what the pad did. The client keeps the robot: the lock, the holds in flight and its buttons all
+  carry on when it comes back, so a press in its next datagram fires. Bad Wi-Fi costs a stop, not
+  the session.
+- **A long silence is the client gone.** After `timeout_ms` with nothing accepted, in-flight holds
   are reset and the lock is released. Then it does what `padd` does when a Bluetooth pad drops
   out: a second later the robot asks where the pad went (a sound) and sits down if it is standing,
   so it is not left frozen in the middle of a room. A robot that refuses — mid-kick, mid-rise — is
@@ -294,7 +301,7 @@ added to `robot.health` reaches this report without a change to the format.
   on its own. The client coming back is greeted with another sound — only if the robot had asked:
   a blip shorter than that second, which bad Wi-Fi produces many times a minute, makes no sound. The journal says so once, at
   `warn`, in each direction: `pad client connected` and `pad client gone`.
-- **The first datagram after a silence, or after `netpadd` starts, fires nothing.** Its buttons
+- **The first datagram after the client was gone, or after `netpadd` starts, fires nothing.** Its buttons
   are taken as already held, so a client that connects with Start down does not stand the robot up or sit it down — not when it
   comes back, not while it stays down, not when it is let go. Any sequence number is accepted after
   a silence, so a restarted sender is picked up within `timeout_ms`: until the old one counts as

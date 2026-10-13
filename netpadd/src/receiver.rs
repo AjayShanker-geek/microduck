@@ -4,6 +4,10 @@
 //! Nothing is queued. The newest accepted state replaces the last one; the edges between them are
 //! accumulated per datagram so none is lost to merging; a send happens on arrival when the last
 //! one is at least `min_interval` old, else at that slot. The spec's §3 is the argument.
+//!
+//! A silence has two stages. Past `stale` the robot is stopped where it stands and the mapping
+//! stops running on a state that no longer says what the pad does; the client keeps the lock and
+//! its buttons, so a Wi-Fi blip costs a stop and nothing else. Past `timeout` it is gone.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -22,11 +26,14 @@ pub const MAX_SEQ_AHEAD: u32 = 1000;
 /// slept, a suspended process), and the datagrams are taken as on time from then on.
 pub const LATE_FOR: Duration = Duration::from_secs(1);
 
-/// Assumes `min_interval <= fallback`, which `[netpad] max_hz >= 10` guarantees in robotd-params.
+/// Assumes `min_interval <= fallback`, which `[netpad] max_hz >= 10` guarantees in robotd-params,
+/// and `stale <= timeout`, which it checks.
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
     /// `1 / [netpad] max_hz`.
     pub min_interval: Duration,
+    /// `[netpad] stale_ms`.
+    pub stale: Duration,
     /// `[netpad] timeout_ms`.
     pub timeout: Duration,
     /// How often the mapping runs with no new datagram — `pad_map::HEARTBEAT`.
@@ -40,7 +47,7 @@ pub enum Accept {
     Taken,
     /// Not newer than what is held, or further ahead than [`MAX_SEQ_AHEAD`].
     Stale,
-    /// Newer, but delivered more than `timeout` later than the stream's fastest — see [`Delivery`].
+    /// Newer, but delivered more than `stale` later than the stream's fastest — see [`Delivery`].
     Late,
     /// Another sender holds the lock.
     OtherPeer,
@@ -51,6 +58,9 @@ pub enum Accept {
 pub enum Step {
     /// Run the mapping on this.
     Tick(PadFrame),
+    /// Nothing new for `stale`: stop the robot where it stands, and run the mapping on nothing
+    /// until the client is heard again. Once a stall.
+    Still,
     /// The client just went quiet: send nothing from now, and reset the holds.
     Gone,
     Idle,
@@ -73,6 +83,8 @@ pub struct Receiver {
     last_tick: Option<Instant>,
     /// Something was accepted since the last tick.
     fresh: bool,
+    /// The robot was stopped for this stall, and nothing has been accepted since.
+    still: bool,
     pressed: Buttons,
     released: Buttons,
     reserved_seen: u16,
@@ -92,6 +104,7 @@ impl Receiver {
             last_rx: Instant::now(),
             last_tick: None,
             fresh: false,
+            still: false,
             pressed: Buttons::NONE,
             released: Buttons::NONE,
             reserved_seen: 0,
@@ -125,7 +138,7 @@ impl Receiver {
             let ours = now.duration_since(self.epoch).as_millis() as u32;
             let judged =
                 self.delivery
-                    .judge(now, ours.wrapping_sub(packet.t_ms), self.timing.timeout);
+                    .judge(now, ours.wrapping_sub(packet.t_ms), self.timing.stale);
             self.lateness = Some(judged.unwrap_or_else(|late| late));
             if judged.is_err() {
                 return Accept::Late;
@@ -149,6 +162,7 @@ impl Receiver {
         self.latest = packet;
         self.last_rx = now;
         self.fresh = true;
+        self.still = false;
         if connected {
             Accept::Connected
         } else {
@@ -160,10 +174,21 @@ impl Receiver {
         if self.peer.is_none() {
             return Step::Idle;
         }
-        if now.duration_since(self.last_rx) >= self.timing.timeout {
+        let quiet = now.duration_since(self.last_rx);
+        if quiet >= self.timing.timeout {
             self.peer = None;
             self.fresh = false;
+            self.still = false;
             return Step::Gone;
+        }
+        if quiet >= self.timing.stale {
+            // No fallback tick either: it would re-send the last stick and keep the deadman fed
+            // on what the pad did, not what it does.
+            if self.still {
+                return Step::Idle;
+            }
+            self.still = true;
+            return Step::Still;
         }
         let due = match self.last_tick {
             None => true,
@@ -187,12 +212,15 @@ impl Receiver {
     pub fn deadline(&self) -> Option<Instant> {
         self.peer?;
         let timeout = self.last_rx + self.timing.timeout;
+        if self.still {
+            return Some(timeout);
+        }
         let next = match self.last_tick {
             None => return Some(self.last_rx),
             Some(at) if self.fresh => at + self.timing.min_interval,
             Some(at) => at + self.timing.fallback,
         };
-        Some(next.min(timeout))
+        Some(next.min(self.last_rx + self.timing.stale).min(timeout))
     }
 
     /// The client driving the robot, while there is one.
@@ -268,9 +296,14 @@ mod tests {
     const B: &str = "10.0.0.3:5000";
 
     fn rx() -> Receiver {
+        rx_with(250, 250)
+    }
+    /// The two stages of a silence apart: stopped at `stale`, gone at `timeout`.
+    fn rx_with(stale: u64, timeout: u64) -> Receiver {
         Receiver::new(Timing {
             min_interval: Duration::from_millis(33),
-            timeout: Duration::from_millis(250),
+            stale: Duration::from_millis(stale),
+            timeout: Duration::from_millis(timeout),
             fallback: Duration::from_millis(100),
         })
     }
@@ -485,7 +518,7 @@ mod tests {
                 requests.extend(out.drain(..).filter(|o| matches!(o, Out::Request(_))));
             }
             Step::Gone => mapper.pad_gone(),
-            Step::Idle => {}
+            Step::Still | Step::Idle => {}
         };
 
         r.on_datagram(t, addr(A), &pkt(1, Buttons::NONE, 0.0));
@@ -565,9 +598,9 @@ mod tests {
         assert_eq!(tick(r.poll(ms(t, 3105))).pressed, Buttons::NONE);
     }
 
-    /// Late by up to `timeout` is jitter, and taken.
+    /// Late by up to `stale` is jitter, and taken.
     #[test]
-    fn late_inside_the_timeout_is_taken() {
+    fn late_inside_stale_is_taken() {
         let (mut r, t) = (rx(), Instant::now());
         r.on_datagram(ms(t, 2), addr(A), &sent(1, 100, Buttons::NONE));
         assert_eq!(
@@ -652,6 +685,76 @@ mod tests {
         assert_eq!(
             r.on_datagram(ms(t, 400), addr(A), &sent(777_777, 1, Buttons::NONE)),
             Accept::Connected
+        );
+    }
+
+    /// A stall shorter than the timeout stops the robot once, ticks nothing while it lasts — not
+    /// even the fallback, which would re-send the last stick — and keeps the session: the next
+    /// datagram is the same client, and a press in it fires.
+    #[test]
+    fn a_stall_stops_once_and_keeps_the_client() {
+        let (mut r, t) = (rx_with(150, 1000), Instant::now());
+        r.on_datagram(t, addr(A), &pkt(1, Buttons::NONE, 0.8));
+        tick(r.poll(t));
+        assert!(
+            (tick(r.poll(ms(t, 100))).left_x - 0.8).abs() < 1e-4,
+            "fresh enough"
+        );
+        assert_eq!(r.deadline(), Some(ms(t, 150)), "woken for the stall");
+        assert_eq!(r.poll(ms(t, 150)), Step::Still);
+        assert_eq!(r.poll(ms(t, 250)), Step::Idle, "no fallback tick");
+        assert_eq!(r.poll(ms(t, 400)), Step::Idle, "and once");
+        assert_eq!(r.deadline(), Some(ms(t, 1000)), "only the timeout left");
+        assert_eq!(r.peer(), Some(addr(A)), "still the client");
+        assert_eq!(
+            r.on_datagram(ms(t, 600), addr(B), &pkt(1, Buttons::NONE, 0.0)),
+            Accept::OtherPeer,
+            "and still holding the lock"
+        );
+
+        assert_eq!(
+            r.on_datagram(ms(t, 600), addr(A), &pkt(2, Buttons::START, 0.0)),
+            Accept::Taken,
+            "not a reconnection"
+        );
+        assert!(tick(r.poll(ms(t, 600))).pressed.contains(Buttons::START));
+        assert_eq!(
+            r.poll(ms(t, 790)),
+            Step::Still,
+            "a second stall stops again"
+        );
+    }
+
+    /// Past the timeout a stall is the client gone, as before.
+    #[test]
+    fn a_stall_past_the_timeout_is_gone() {
+        let (mut r, t) = (rx_with(150, 1000), Instant::now());
+        r.on_datagram(t, addr(A), &pkt(1, Buttons::NONE, 0.0));
+        tick(r.poll(t));
+        assert_eq!(r.poll(ms(t, 150)), Step::Still);
+        assert_eq!(r.poll(ms(t, 1000)), Step::Gone);
+        assert_eq!(
+            r.on_datagram(ms(t, 1100), addr(A), &pkt(9, Buttons::START, 0.0)),
+            Accept::Connected
+        );
+        assert_eq!(tick(r.poll(ms(t, 1100))).pressed, Buttons::NONE);
+    }
+
+    /// A datagram delivered later than `stale` says what the pad did: it is dropped, however long
+    /// the timeout.
+    #[test]
+    fn late_is_measured_against_stale_not_the_timeout() {
+        let (mut r, t) = (rx_with(150, 1000), Instant::now());
+        r.on_datagram(ms(t, 2), addr(A), &sent(1, 100, Buttons::NONE));
+        assert_eq!(
+            r.on_datagram(ms(t, 185), addr(A), &sent(2, 133, Buttons::NONE)),
+            Accept::Taken,
+            "150 ms late"
+        );
+        assert_eq!(
+            r.on_datagram(ms(t, 220), addr(A), &sent(3, 166, Buttons::NONE)),
+            Accept::Late,
+            "152 ms late"
         );
     }
 }

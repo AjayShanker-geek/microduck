@@ -14,8 +14,8 @@ use pad_map::wire::{BUSY_EVERY, Status, Verdict};
 /// worth reporting on a LAN.
 const RING: usize = 256;
 
-/// No answer for this long, after there were some, is the duck not answering. Twice `netpadd`'s
-/// default `timeout_ms`: by then it has counted this client gone.
+/// No answer for this long, after there were some, is the duck not answering. Past `netpadd`'s
+/// default `stale_ms`: by then it has stopped the robot.
 pub const SILENT: Duration = Duration::from_millis(500);
 
 /// The same, for a sender the duck has refused: it is told so only every [`BUSY_EVERY`], so a

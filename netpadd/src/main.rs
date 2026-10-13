@@ -158,6 +158,7 @@ async fn serve(
     tracing::warn!(
         port,
         max_hz = np.max_hz,
+        stale_ms = np.stale_ms,
         timeout_ms = np.timeout_ms,
         roller,
         "listening for a pad over UDP"
@@ -165,6 +166,7 @@ async fn serve(
 
     let mut rx = Receiver::new(Timing {
         min_interval,
+        stale: Duration::from_millis(np.stale_ms),
         timeout: Duration::from_millis(np.timeout_ms),
         fallback: HEARTBEAT,
     });
@@ -215,6 +217,7 @@ async fn serve(
                             p99_ms = s.p99,
                             max_ms = s.max,
                             late = s.late,
+                            stalls = s.stalls,
                             "link: how late the pad's datagrams arrived, above the fastest, over the last {:?}",
                             DROPPED_LOG
                         );
@@ -247,7 +250,7 @@ async fn serve(
                         Accept::Late => {
                             late += 1;
                             if late_logged.is_none_or(|at| now.duration_since(at) >= DROPPED_LOG) {
-                                tracing::warn!(%from, late, "dropping datagrams delivered later than timeout_ms — a backlog on the link");
+                                tracing::warn!(%from, late, "dropping datagrams delivered later than stale_ms — a backlog on the link");
                                 late_logged = Some(now);
                             }
                         }
@@ -324,6 +327,24 @@ async fn serve(
 
         match rx.poll(now) {
             Step::Idle => {}
+            Step::Still => {
+                // Nothing new for `stale_ms`: the walking stops now, not a deadman after the last
+                // stick re-sent. Only the velocity — the head and the body pose are positions, and
+                // zeroing them would throw the head to the centre on every blip.
+                lateness.stalled();
+                tracing::debug!("pad client stalled — the robot stopped where it stands");
+                for call in &mut frame {
+                    if let proto::Call::RobotMove(m) = call {
+                        *m = proto::MoveParams::default();
+                    }
+                }
+                if let Some(bytes) = continuous.next(&frame, now)
+                    && let Err(e) = robot.write(bytes).await
+                {
+                    tracing::error!(error = %e, "send failed");
+                    return std::process::ExitCode::FAILURE;
+                }
+            }
             Step::Gone => {
                 tracing::warn!(
                     "pad client gone — robotd's deadman stops the walking; sitting down in {:?} if it stays gone",
@@ -373,6 +394,7 @@ struct Lateness {
     since: Option<Instant>,
     ms: Vec<u32>,
     late: u32,
+    stalls: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -383,9 +405,15 @@ struct LatenessSummary {
     max: u32,
     /// Of `datagrams`, the ones dropped as late.
     late: u32,
+    /// How often the robot was stopped for nothing new in `stale_ms`.
+    stalls: u32,
 }
 
 impl Lateness {
+    fn stalled(&mut self) {
+        self.stalls += 1;
+    }
+
     fn record(&mut self, now: Instant, ms: u32, dropped: bool) -> Option<LatenessSummary> {
         let since = *self.since.get_or_insert(now);
         self.ms.push(ms);
@@ -401,6 +429,7 @@ impl Lateness {
             p99: at(99),
             max: at(100),
             late: self.late,
+            stalls: self.stalls,
         };
         *self = Self::default();
         Some(summary)
@@ -509,6 +538,7 @@ mod tests {
             let at = t + std::time::Duration::from_millis(u64::from(i) * 33);
             assert_eq!(l.record(at, i % 10, false), None);
         }
+        l.stalled();
         assert_eq!(
             l.record(t + super::DROPPED_LOG, 900, true),
             Some(super::LatenessSummary {
@@ -516,7 +546,8 @@ mod tests {
                 p50: 5,
                 p99: 9,
                 max: 900,
-                late: 1
+                late: 1,
+                stalls: 1
             })
         );
         assert_eq!(
@@ -636,10 +667,24 @@ mod tests {
         // and pass the silence check below for the wrong reason.
         assert!(!serving.is_finished(), "serve exited while driving");
 
-        // Silence: after the timeout no motion is sent. (What is sent instead — the sound, then
-        // the sit — is `a_client_gone_sits_the_robot_after_a_second`.)
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        while seen.try_recv().is_ok() {}
+        // Silence: past `stale_ms` the robot is stopped, once, and then no motion is sent at all
+        // — not the last stick again, which would keep robotd's deadman fed. (What follows past
+        // the timeout — the sound, then the sit — is `a_client_gone_sits_the_robot_after_a_second`.)
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let moves: Vec<_> = std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|(m, _)| m == "robot.move")
+            .map(|(_, p)| p)
+            .collect();
+        let stop = moves.last().expect("a stop");
+        assert_eq!(
+            (
+                stop["vx"].as_f64(),
+                stop["vy"].as_f64(),
+                stop["vyaw"].as_f64()
+            ),
+            (Some(0.0), Some(0.0), Some(0.0)),
+            "the last move is a stop: {moves:?}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let late: Vec<_> = std::iter::from_fn(|| seen.try_recv().ok())
             .map(|(m, _)| m)
@@ -812,8 +857,8 @@ mod tests {
         let seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
         drain(&mut seen);
 
-        // Silent: gone at timeout_ms (250), the sit due a second after that.
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        // Silent: gone at timeout_ms (1000), the sit due a second after that.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let early = drain(&mut seen);
         assert!(
             !early
@@ -855,10 +900,33 @@ mod tests {
         let seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
         drain(&mut seen);
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         hold(&client, seq.wrapping_add(1000), pad_map::Buttons::NONE, 100).await;
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         let sent = drain(&mut seen);
+        assert!(
+            !sent
+                .iter()
+                .any(|(m, _)| m == "robot.sound" || m == "robot.do"),
+            "{sent:?}"
+        );
+        assert!(!serving.is_finished());
+    }
+
+    /// A stall shorter than `timeout_ms` keeps the client: no sound, no sit, and a Start tapped
+    /// once it is back is a tap — not a button taken as already held, as after a reconnection.
+    #[tokio::test]
+    async fn a_stalled_client_keeps_its_session() {
+        let (_dir, mut seen, serving, client) = start().await;
+        let seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let seq = hold(&client, seq, pad_map::Buttons::START, 100).await;
+        hold(&client, seq, pad_map::Buttons::NONE, 200).await;
+        let sent = drain(&mut seen);
+        assert!(
+            sent.iter().any(|(m, _)| m == "robot.init"),
+            "the tap stands it up: {sent:?}"
+        );
         assert!(
             !sent
                 .iter()
