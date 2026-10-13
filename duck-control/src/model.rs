@@ -34,10 +34,23 @@ pub const MOUTH_INDEX: usize = 9;
 /// Must match `HOME_FRAME` in the training env — a policy is trained against these angles
 /// and observes joint positions *relative* to them, so a discrepancy here is a constant
 /// offset on 14 observation slots.
-///
-/// The table itself is `duck_ipc_proto::HOME_POSE`, beside the joint names, so a client that
-/// draws the robot standing poses it with the same numbers.
-pub const DEFAULT_POSITION: [f64; NUM_JOINTS] = duck_ipc_proto::HOME_POSE;
+pub const DEFAULT_POSITION: [f64; NUM_JOINTS] = [
+    0.0,     // left_hip_yaw
+    -0.0873, // left_hip_roll
+    -0.4579, // left_hip_pitch
+    -0.0049, // left_knee
+    0.4530,  // left_ankle
+    0.3491,  // neck_pitch
+    0.3491,  // head_pitch
+    0.0,     // head_yaw
+    0.0,     // head_roll
+    0.0,     // mouth
+    0.0,     // right_hip_yaw
+    0.0873,  // right_hip_roll
+    0.4579,  // right_hip_pitch
+    0.0049,  // right_knee
+    -0.4530, // right_ankle
+];
 
 /// Rest pose: where a seated robot settles with its torque off. Recorded on graphite-bang
 /// sitting stably untorqued (2026-10-03), averaged over a second of samples.

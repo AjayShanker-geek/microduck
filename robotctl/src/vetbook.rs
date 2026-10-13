@@ -39,21 +39,79 @@ const LILAC: Color = Color::Indexed(141);
 const DIM: Color = Color::Indexed(244);
 const ALERT: Color = Color::Indexed(203);
 
-/// The patient card's height, borders included: seven lines.
+/// The patient card's height, borders included: seven lines, which is the head's fourteen
+/// pixels at two to a cell.
 const HEADER_HEIGHT: u16 = 9;
 
-/// The patient panel on the Life tab: its width, and the page width below which it is left out
-/// rather than squeezed. The monitor's renderer wants room — at a header's ten rows the duck is
-/// twenty pixels tall, a smudge on a floor — so it gets the tab's whole height, or nothing.
-const PATIENT_WIDTH: u16 = 42;
-const PATIENT_MIN_PAGE: u16 = 130;
+/// A microduck's head from the side, as pixels: the rounded grey back, the white face, the camera
+/// eye ringed in orange and bulging past the front, and the beak — an orange tray sticking out
+/// under the head, with its lavender pad. Drawn two pixels to a cell with half blocks, so the
+/// pixels come out square; `.` is the terminal's own background.
+const HEAD: [&str; 14] = [
+    ".......KKKKKKKKKKKKKKKKK......",
+    ".....KKwwWWWWWWWWWWWWWWWK.....",
+    "....KwWWWWWWWWWWWWWKKKKKK.....",
+    "...KgwWWWWWWWWWWWWKOOOOOK.....",
+    "..KggwWWWWWWWWWWWKOOLLLOOK....",
+    ".KGggwWWWWWWWWWWWKOLlLLLOK....",
+    ".KGggwWWWWWWWWWWWKOLLLLLOK....",
+    "KGGggwWWWWWWWWWWWKOOLLLOOK....",
+    "KGGggwWWWWWWWWWWWWKOOOOOK.....",
+    "KGGggwWWWWWWWWWWWWWKKKKKK.....",
+    "KGGggwWWWWWWWWWWWWWWWWWWK.....",
+    "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOK",
+    "OOPPPPPPPPPPPPPPPPPPPPPPPPOOOK",
+    ".oooooooooooooooooooooooooooo.",
+];
+const HEAD_WIDTH: u16 = 30;
 
-/// How fast the duck turns on the exam table, radians per second.
-const TURNTABLE: f32 = 0.6;
+fn head_colour(pixel: u8) -> Option<Color> {
+    Some(match pixel {
+        b'K' => Color::Rgb(20, 20, 24),
+        b'W' => Color::Rgb(240, 240, 240),
+        b'w' => Color::Rgb(214, 214, 214),
+        b'g' => Color::Rgb(176, 176, 180),
+        b'G' => Color::Rgb(140, 140, 146),
+        b'O' => Color::Rgb(255, 135, 0),
+        b'o' => Color::Rgb(200, 90, 0),
+        b'L' => Color::Rgb(26, 30, 48),
+        b'l' => Color::Rgb(140, 210, 255),
+        b'P' => Color::Rgb(196, 168, 232),
+        _ => return None,
+    })
+}
 
-/// How often the page redraws: the turntable wants frames, the book only changes every
-/// [`REFRESH`].
-const FRAME: Duration = Duration::from_millis(80);
+/// Paint [`HEAD`] into `area`, two rows of pixels per row of cells.
+fn render_head(area: Rect, buf: &mut Buffer) {
+    for row in 0..(HEAD.len() / 2) as u16 {
+        if row >= area.height {
+            break;
+        }
+        let (top, bottom) = (
+            HEAD[2 * row as usize].as_bytes(),
+            HEAD[2 * row as usize + 1].as_bytes(),
+        );
+        for x in 0..HEAD_WIDTH.min(area.width) {
+            let (t, b) = (
+                head_colour(top[x as usize]),
+                head_colour(bottom[x as usize]),
+            );
+            let cell = &mut buf[(area.x + x, area.y + row)];
+            match (t, b) {
+                (Some(t), Some(b)) => {
+                    cell.set_symbol("▀").set_fg(t).set_bg(b);
+                }
+                (Some(t), None) => {
+                    cell.set_symbol("▀").set_fg(t);
+                }
+                (None, Some(b)) => {
+                    cell.set_symbol("▄").set_fg(b);
+                }
+                (None, None) => {}
+            }
+        }
+    }
+}
 
 pub fn run(robot_socket: &Path, config_socket: &Path, json: bool) -> Result<(), Failure> {
     let book = fetch(robot_socket)?;
@@ -147,8 +205,6 @@ struct Page {
     /// Why the last refresh failed, shown in the footer while the old book stays up.
     stale: Option<String>,
     now: i64,
-    /// The 3D duck in the header, and where its turntable has got to.
-    duck: crate::duck::DuckView,
     /// A diary line being typed, while `n` has the keyboard.
     draft: Option<String>,
     /// What came of the last line written, shown in the footer for a few seconds.
@@ -171,19 +227,15 @@ fn live(
         now: crate::unix_now(),
         draft: None,
         written: None,
-        duck: crate::duck::DuckView::new(),
     };
     let mut fetched = Instant::now();
-    let mut turned = Instant::now();
     loop {
-        page.duck.orbit(TURNTABLE * turned.elapsed().as_secs_f32());
-        turned = Instant::now();
         page.now = crate::unix_now();
         terminal
             .draw(|frame| page.render(frame.area(), frame.buffer_mut()))
             .map_err(|e| Failure::new(exit::FAILED, format!("cannot draw: {e}")))?;
 
-        let wait = REFRESH.saturating_sub(fetched.elapsed()).min(FRAME);
+        let wait = REFRESH.saturating_sub(fetched.elapsed());
         if event::poll(wait).unwrap_or(false)
             && let Ok(Event::Key(key)) = event::read()
             && key.kind == KeyEventKind::Press
@@ -293,20 +345,7 @@ impl Page {
             .render(tabs, buf);
 
         match self.tab {
-            Tab::Life => {
-                let body = if body.width >= PATIENT_MIN_PAGE {
-                    let [patient, rest] = Layout::horizontal([
-                        Constraint::Length(PATIENT_WIDTH),
-                        Constraint::Min(60),
-                    ])
-                    .areas(body);
-                    self.render_patient(patient, buf);
-                    rest
-                } else {
-                    body
-                };
-                self.render_life(body, buf)
-            }
+            Tab::Life => self.render_life(body, buf),
             Tab::Motors => self.render_motors(body, buf),
             Tab::Diary => self.render_diary(body, buf),
         }
@@ -357,8 +396,15 @@ impl Page {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(DUCK));
-        let text = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+        let inner = block.inner(area);
         block.render(area, buf);
+        let [head, _, text] = Layout::horizontal([
+            Constraint::Length(HEAD_WIDTH),
+            Constraint::Length(3),
+            Constraint::Min(10),
+        ])
+        .areas(inner);
+        render_head(head, buf);
 
         let b = &self.book;
         let life = &b.life;
@@ -425,18 +471,6 @@ impl Page {
             Span::styled(verdict, Style::new().fg(colour).bold()),
         ]));
         Paragraph::new(lines).render(text, buf);
-    }
-
-    /// The duck itself, turning slowly on the exam table: the model, renderer and home pose
-    /// `robotctl monitor` draws, standing upright.
-    fn render_patient(&mut self, area: Rect, buf: &mut Buffer) {
-        let block = panel("the patient");
-        let inner = block.inner(area);
-        block.render(area, buf);
-        if let Some(model) = crate::duck::model() {
-            self.duck
-                .draw(model, &proto::HOME_POSE, [0.0, 0.0, -1.0], &[], inner, buf);
-        }
     }
 
     fn render_life(&self, area: Rect, buf: &mut Buffer) {
@@ -1285,7 +1319,6 @@ mod tests {
             now: 1_760_300_000,
             draft: draft.map(str::to_owned),
             written: None,
-            duck: crate::duck::DuckView::new(),
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(width, 40)).unwrap();
         terminal
@@ -1345,7 +1378,6 @@ mod tests {
             now: 1_760_300_000,
             draft: None,
             written: None,
-            duck: crate::duck::DuckView::new(),
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal
