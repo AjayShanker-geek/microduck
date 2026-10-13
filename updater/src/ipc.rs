@@ -804,6 +804,8 @@ impl Server {
             | Call::RobotSetMode(_)
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
+            | Call::RobotVetbookNote(_)
             | Call::RobotLoadPolicy(_)
             | Call::RobotReloadPolicies
             | Call::RobotSubscribe(_) => Response::err(

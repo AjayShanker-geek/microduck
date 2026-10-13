@@ -1004,7 +1004,7 @@ arithmetic, it was that nothing read the answer.
 
 ### 4.5 What else the loop drives, and why none of it has a design page
 
-`robotd` grew four subsystems after slice 2 that are not control and not safety. They share a
+`robotd` grew five subsystems after slice 2 that are not control and not safety. They share a
 shape: each hangs off the tick, none may block it, and none can reach the bus except through the
 intents the loop already arbitrates.
 
@@ -1014,6 +1014,7 @@ intents the loop already arbitrates.
 | `theremin.rs` | depth from `tofd` at 15 Hz → a note, a mouth opening, and a line of state, sampled by the 50 Hz loop and never waited on | the module header |
 | `chorale.rs` | several ducks singing one piece: the lowest id conducts, the conductor owns the seating, `btd` carries the beacons and does no thinking | the module header |
 | `pet-detect/` | a ~20 KB CNN over a 40-band log-mel window from the onboard mic, in its own worker | the crate header |
+| `vetbook.rs` | the robot's lifetime record: a tally the tick adds to without a lock, handed to the shared book once a second with `try_lock`, saved atomically once a minute; plus a 1-byte read of each servo's latched alerts every 10 s | the module header, and `duck_ipc_proto::vetbook` for the record |
 
 Plus `soc.rs`, which reads the board's own thermal zones and clock ceiling out of `sysfs` — not
 behind `RobotIo`, because it has to keep answering when the motor bus does not.
