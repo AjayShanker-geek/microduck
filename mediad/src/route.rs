@@ -207,6 +207,11 @@ fn permits(call: &proto::Call) -> bool {
         // different thing arriving.
         AccountLogin(_) | AccountStatus | AccountLogout => true,
 
+        // Not sharing, though. A share publishes under the owner's name, in public, and §4 — no
+        // authorisation on this transport — would let any LAN peer do that. The phone over BLE
+        // and `robotctl` on the robot are where a share comes from.
+        VetbookShare => false,
+
         // ── the streams BLE pointed here ────────────────────────────────────
         //
         // `pad.input` exists to measure the cadence of its own delivery, and `btd` refuses it

@@ -123,7 +123,12 @@ fn render_head(area: Rect, buf: &mut Buffer) {
     }
 }
 
-pub fn run(robot_socket: &Path, config_socket: &Path, json: bool) -> Result<(), Failure> {
+pub fn run(
+    robot_socket: &Path,
+    config_socket: &Path,
+    updater_socket: &Path,
+    json: bool,
+) -> Result<(), Failure> {
     let book = fetch(robot_socket)?;
     if json {
         println!(
@@ -138,7 +143,7 @@ pub fn run(robot_socket: &Path, config_socket: &Path, json: bool) -> Result<(), 
         return Ok(());
     }
     let mut terminal = ratatui::init();
-    let outcome = live(&mut terminal, robot_socket, book, &name);
+    let outcome = live(&mut terminal, robot_socket, updater_socket, book, &name);
     ratatui::restore();
     outcome
 }
@@ -219,11 +224,31 @@ struct Page {
     draft: Option<String>,
     /// What came of the last line written, shown in the footer for a few seconds.
     written: Option<(Result<(), String>, Instant)>,
+    /// A share under way, or its outcome, shown over the page until a key is pressed.
+    share: Share,
+}
+
+/// `s`: publishing the book through `updaterd` (`vetbook.share`).
+#[derive(Default)]
+enum Share {
+    #[default]
+    Closed,
+    /// Drawn once before the call is made, so the page says what it is waiting for.
+    Working,
+    Done(Result<proto::VetbookShareResult, String>),
+}
+
+/// `vetbook.share`, served by `updaterd`: it holds the account and the network.
+fn share(socket: &Path) -> Result<proto::VetbookShareResult, Failure> {
+    let mut client = Client::connect_to("updaterd", socket)?;
+    client.hello()?;
+    decode(&result_of(client.call(&proto::Call::VetbookShare)?)?)
 }
 
 fn live(
     terminal: &mut DefaultTerminal,
     socket: &Path,
+    updater_socket: &Path,
     book: Vetbook,
     name: &str,
 ) -> Result<(), Failure> {
@@ -237,6 +262,7 @@ fn live(
         now: crate::unix_now(),
         draft: None,
         written: None,
+        share: Share::Closed,
     };
     let mut fetched = Instant::now();
     loop {
@@ -245,12 +271,23 @@ fn live(
             .draw(|frame| page.render(frame.area(), frame.buffer_mut()))
             .map_err(|e| Failure::new(exit::FAILED, format!("cannot draw: {e}")))?;
 
+        // The "sharing…" frame is on screen; now the few seconds of talking to Hugging Face.
+        if matches!(page.share, Share::Working) {
+            page.share = Share::Done(share(updater_socket).map_err(|e| e.message));
+            continue;
+        }
+
         let wait = REFRESH.saturating_sub(fetched.elapsed());
         if event::poll(wait).unwrap_or(false)
             && let Ok(Event::Key(key)) = event::read()
             && key.kind == KeyEventKind::Press
         {
             let rows = page.book.motors.len();
+            // A share's outcome stays up until it has been read: any key closes it.
+            if matches!(page.share, Share::Done(_)) {
+                page.share = Share::Closed;
+                continue;
+            }
             // While a line is being typed every key is text, `q` included.
             if let Some(draft) = page.draft.as_mut() {
                 match key.code {
@@ -309,6 +346,7 @@ fn live(
                     page.tab = Tab::Diary;
                     page.draft = Some(String::new());
                 }
+                KeyCode::Char('s') => page.share = Share::Working,
                 _ => {}
             }
         }
@@ -378,7 +416,9 @@ impl Page {
                 key("↑↓"),
                 what(" scroll  "),
                 key("n"),
-                what(" write in the diary"),
+                what(" write in the diary  "),
+                key("s"),
+                what(" share"),
             ]
         };
         match &self.written {
@@ -399,9 +439,90 @@ impl Page {
             ));
         }
         Line::from(keys).render(footer, buf);
+
+        if !matches!(self.share, Share::Closed) {
+            self.render_share(area, buf);
+        }
     }
 
     /// The patient card: the few lines a vet would read first.
+    /// The share, over the middle of the page: waiting, or the link and a QR code to open it on a
+    /// phone, or why it did not work.
+    fn render_share(&self, area: Rect, buf: &mut Buffer) {
+        let qr = match &self.share {
+            Share::Done(Ok(shared)) => qr_modules(&shared.url),
+            _ => None,
+        };
+        let qr_rows = qr.as_ref().map_or(0, |m| m.len().div_ceil(2) as u16);
+        let qr_cols = qr.as_ref().map_or(0, |m| m.len() as u16);
+        // Wide enough for the link on one line, so nothing wraps into the code below it.
+        let url_cols = match &self.share {
+            Share::Done(Ok(shared)) => shared.url.chars().count() as u16,
+            _ => 0,
+        };
+        let width = (qr_cols + 6)
+            .max(url_cols + 6)
+            .max(64)
+            .min(area.width.saturating_sub(2));
+        let height = (qr_rows + 8).min(area.height.saturating_sub(2));
+        let popup = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+        ratatui::widgets::Clear.render(popup, buf);
+        let (title, colour) = match &self.share {
+            Share::Done(Err(_)) => (" not shared ", ALERT),
+            Share::Done(Ok(_)) => (" shared ♡ ", LEAF),
+            _ => (" sharing… ", DUCK),
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(colour))
+            .title(Span::styled(title, Style::new().fg(colour).bold()));
+        let inner = block.inner(popup).inner(ratatui::layout::Margin::new(1, 0));
+        block.render(popup, buf);
+
+        let lines = match &self.share {
+            Share::Done(Ok(shared)) => vec![
+                Line::styled(shared.url.clone(), Style::new().fg(DUCK).bold()),
+                Line::from(vec![
+                    Span::styled("drew the ", Style::new().fg(DIM)),
+                    Span::styled(shared.card.clone(), Style::new().fg(BLUSH).bold()),
+                    Span::styled(" card · book at ", Style::new().fg(DIM)),
+                    Span::raw(shared.dataset.clone()),
+                ]),
+            ],
+            Share::Done(Err(why)) => vec![Line::styled(why.clone(), Style::new().fg(ALERT))],
+            _ => vec![Line::styled(
+                "publishing the vet book to your Hugging Face account…",
+                Style::new().fg(DIM),
+            )],
+        };
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .render(inner, buf);
+
+        if let Some(modules) = &qr {
+            let left = inner.x + inner.width.saturating_sub(qr_cols) / 2;
+            render_qr(modules, Rect::new(left, inner.y + 3, qr_cols, qr_rows), buf);
+        }
+        if matches!(self.share, Share::Done(_)) {
+            let hint = if qr.is_some() {
+                "scan it to post from your phone · any key closes"
+            } else {
+                "any key closes"
+            };
+            Line::styled(hint, Style::new().fg(DIM))
+                .alignment(Alignment::Center)
+                .render(
+                    Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+                    buf,
+                );
+        }
+    }
+
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -910,6 +1031,51 @@ impl Page {
 
 // ── the pieces ───────────────────────────────────────────────────────────────
 
+/// A QR code for `text`, as rows of dark (`true`) and light modules with a two-module quiet zone.
+fn qr_modules(text: &str) -> Option<Vec<Vec<bool>>> {
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let width = code.width();
+    let colors = code.to_colors();
+    const QUIET: usize = 2;
+    let side = width + 2 * QUIET;
+    let mut rows = vec![vec![false; side]; side];
+    for y in 0..width {
+        for x in 0..width {
+            rows[y + QUIET][x + QUIET] = colors[y * width + x] == qrcode::Color::Dark;
+        }
+    }
+    Some(rows)
+}
+
+/// Two modules to a cell with half blocks, in black on white whatever the terminal's theme: a
+/// phone's camera reads dark-on-light, and a light-on-dark code fails on half of them.
+fn render_qr(modules: &[Vec<bool>], area: Rect, buf: &mut Buffer) {
+    let shade = |dark: bool| {
+        if dark {
+            Color::Rgb(0, 0, 0)
+        } else {
+            Color::Rgb(255, 255, 255)
+        }
+    };
+    for (row, pair) in modules.chunks(2).enumerate() {
+        let y = area.y + row as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        for (x, &top) in pair[0].iter().enumerate() {
+            let x = area.x + x as u16;
+            if x >= area.right() {
+                break;
+            }
+            let bottom = pair.get(1).is_some_and(|r| r[x as usize - area.x as usize]);
+            buf[(x, y)]
+                .set_symbol("▀")
+                .set_fg(shade(top))
+                .set_bg(shade(bottom));
+        }
+    }
+}
+
 fn panel(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1326,6 +1492,10 @@ mod tests {
     }
 
     fn draw_with(tab: Tab, width: u16, draft: Option<&str>) -> String {
+        draw_page(tab, width, draft, Share::Closed)
+    }
+
+    fn draw_page(tab: Tab, width: u16, draft: Option<&str>, share: Share) -> String {
         let mut page = Page {
             book: sample(),
             name: "lavender-star".into(),
@@ -1336,6 +1506,7 @@ mod tests {
             now: 1_760_300_000,
             draft: draft.map(str::to_owned),
             written: None,
+            share,
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(width, 40)).unwrap();
         terminal
@@ -1395,6 +1566,18 @@ mod tests {
             now: 1_760_300_000,
             draft: None,
             written: None,
+            // `VETBOOK_DUMP_SHARE=1` draws the page with a share's popup over it.
+            share: if std::env::var("VETBOOK_DUMP_SHARE").is_ok() {
+                Share::Done(Ok(proto::VetbookShareResult {
+                    url: "https://pollen-robotics-microduck-vetbook.hf.space/d/apirrone/lavender-star"
+                        .into(),
+                    image: String::new(),
+                    dataset: "apirrone/lavender-star-vetbook".into(),
+                    card: "purikura".into(),
+                }))
+            } else {
+                Share::Closed
+            },
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal
@@ -1431,6 +1614,47 @@ mod tests {
         assert_eq!(verdict(&book).1, ALERT, "the knee's overload still counts");
         book.motors[3].wear.trips = Default::default();
         assert_ne!(verdict(&book).1, ALERT);
+    }
+
+    #[test]
+    fn a_share_shows_the_link_and_a_qr_code() {
+        let shared = proto::VetbookShareResult {
+            url: "https://pollen-robotics-microduck-vetbook.hf.space/d/apirrone/lavender-star"
+                .into(),
+            image: String::new(),
+            dataset: "apirrone/lavender-star-vetbook".into(),
+            card: "purikura".into(),
+        };
+        let page = draw_page(Tab::Life, 120, None, Share::Done(Ok(shared)));
+        assert!(page.contains("shared ♡"), "{page}");
+        assert!(page.contains("/d/apirrone/lavender-star"));
+        assert!(page.contains("purikura"));
+        assert!(page.contains("▀"), "no QR code drawn");
+        assert!(page.contains("any key closes"));
+    }
+
+    #[test]
+    fn a_failed_share_says_why() {
+        let why = "this robot is not signed in to Hugging Face".to_owned();
+        let page = draw_page(Tab::Life, 100, None, Share::Done(Err(why)));
+        assert!(page.contains("not shared"), "{page}");
+        assert!(page.contains("not signed in"));
+        let waiting = draw_page(Tab::Life, 100, None, Share::Working);
+        assert!(waiting.contains("sharing…"));
+    }
+
+    #[test]
+    fn the_qr_code_reads_back_as_the_link() {
+        let url = "https://pollen-robotics-microduck-vetbook.hf.space/d/apirrone/graphite-bang";
+        let modules = qr_modules(url).unwrap();
+        // Square, with the quiet zone light all round, and the finder pattern dark in its corner.
+        assert_eq!(modules.len(), modules[0].len());
+        assert!(modules[0].iter().all(|&m| !m));
+        assert!(modules[2][2], "the top-left finder pattern starts dark");
+        // The same data encodes to the same modules: this is the code for the URL, not for
+        // something truncated on the way.
+        let again = qrcode::QrCode::new(url.as_bytes()).unwrap();
+        assert_eq!(again.width() + 4, modules.len());
     }
 
     #[test]
