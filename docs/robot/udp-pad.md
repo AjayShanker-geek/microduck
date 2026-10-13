@@ -205,6 +205,9 @@ The rules a sender follows, and why:
   starting point works, but a clock that jumps reads as late for a second before it is taken.
 - **Send on change, plus a keepalive every `1/hz`.** The change is what makes it feel immediate; the
   keepalive is what tells the robot you are still there.
+- **Mark the socket DSCP EF** (IP TOS `0xB8`). An access point honouring WMM then queues the
+  datagrams ahead of bulk traffic; one that does not loses nothing. `duckctl udp-pad` does, and the
+  robot marks its answers the same way.
 - **Stop sending to let go.** There is no goodbye packet. Silence is the signal, and it is the same
   one a pad that lost its battery gives.
 
@@ -270,10 +273,15 @@ added to `robot.health` reaches this report without a change to the format.
   the fastest delivery seen from the same stream is dropped and counted as stale, and buttons
   pressed in it fire nothing: it says what the pad did, not what it does. The count is logged at
   most once every 10 seconds. A stream is the same sender continuing its `seq`, across a silence
-  too, so a backlog that arrives after the client counted as gone is still dropped; a restarted
-  sender is a new one, judged by its own clock. Late by the same amount for a whole second is the
-  sender's clock having moved, not a backlog — a backlog drains in bursts, each far less late than
-  the one before — and the stream is taken again.
+  too, so a backlog that arrives after the client counted as gone is still dropped, and so is a
+  duplicate or reordered one in it, at or a little behind the last `seq`. A restarted sender, at a
+  random `seq`, is a new one, judged by its own clock. Late by the same amount for a whole second
+  is the sender's clock having moved, not a backlog — a backlog drains in bursts, each far less
+  late than the one before — and the stream is taken again.
+- **How late datagrams arrive is logged.** Every 10 seconds while a client drives, `netpadd` logs
+  a `link:` line: the p50, p99 and largest delay above the stream's fastest delivery, in ms, and how
+  many were dropped as late. A few ms is a healthy link. Hundreds with nothing dropped is a lag
+  under `timeout_ms`; `late` above 0 is a backlog or a lag beyond it.
 - **The first sender holds it.** The robot locks to the address of the first datagram it accepts and
   drops datagrams from any other address until that one has been silent for `timeout_ms`, so two
   people driving honestly cannot fight over one duck. It is not protection: see [trust](#trust).
