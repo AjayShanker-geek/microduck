@@ -17,9 +17,9 @@ use pad_map::{Buttons, PadFrame};
 /// hand the robot to whoever forged it.
 pub const MAX_SEQ_AHEAD: u32 = 1000;
 
-/// Late without a break for this long is not a backlog — one drains in a burst, in milliseconds —
-/// but the sender's clock having moved (a laptop that slept, a suspended process), and the
-/// datagrams are taken as on time from then on.
+/// Late by the same amount for this long is not a backlog — one drains in bursts, each later
+/// datagram less late than the one before — but the sender's clock having moved (a laptop that
+/// slept, a suspended process), and the datagrams are taken as on time from then on.
 pub const LATE_FOR: Duration = Duration::from_secs(1);
 
 /// Assumes `min_interval <= fallback`, which `[netpad] max_hz >= 10` guarantees in robotd-params.
@@ -109,9 +109,12 @@ impl Receiver {
             Some(_) if !continues => return Accept::Stale,
             _ => {}
         }
-        // A new stream brings its own clock; the same one back after a silence keeps its own, so
-        // what it queued during that silence is still known for late.
-        if !continues {
+        // A new stream brings its own clock. The same one back after a silence keeps its own, so
+        // what it queued during that silence is still known for late — and so does a duplicate or
+        // a reordered one among it, at or a little behind the last `seq`: a restarted sender starts
+        // at a random one, and does not land there.
+        let behind = ahead.wrapping_neg() <= MAX_SEQ_AHEAD;
+        if self.stream != Some(from) || !(continues || behind) {
             self.delivery = Delivery::default();
         }
         if packet.t_ms != 0 {
@@ -208,7 +211,10 @@ impl Receiver {
 #[derive(Debug, Default)]
 struct Delivery {
     fastest: Option<u32>,
-    late_since: Option<Instant>,
+    /// Late datagrams agreeing on an offset, within the limit: since when, and the fastest of them.
+    /// A moved clock holds one steady; a backlog never does, as each burst is far less late than
+    /// the last datagram of the one before.
+    moved: Option<(Instant, u32)>,
 }
 
 impl Delivery {
@@ -222,13 +228,21 @@ impl Delivery {
         if late < 0 {
             self.fastest = Some(offset);
         } else if late as u128 > limit.as_millis() {
-            let since = *self.late_since.get_or_insert(now);
+            let (since, steady) = match self.moved {
+                Some((since, steady)) => match offset.wrapping_sub(steady) as i32 {
+                    d if d.unsigned_abs() as u128 > limit.as_millis() => (now, offset),
+                    d if d < 0 => (since, offset),
+                    _ => (since, steady),
+                },
+                None => (now, offset),
+            };
             if now.duration_since(since) < LATE_FOR {
+                self.moved = Some((since, steady));
                 return false;
             }
-            self.fastest = Some(offset);
+            self.fastest = Some(steady);
         }
-        self.late_since = None;
+        self.moved = None;
         true
     }
 }
@@ -572,6 +586,48 @@ mod tests {
         }
         let first = first_taken.expect("taken in the end");
         assert!((1500..1600).contains(&first), "taken at {first} ms");
+    }
+
+    /// The link lets a backlog go in two bursts, more than [`LATE_FOR`] apart: neither drives, as
+    /// each burst is far less late than the one before — not the steady offset of a moved clock.
+    #[test]
+    fn a_backlog_in_bursts_is_dropped_however_long_it_takes() {
+        let (mut r, t) = (rx(), Instant::now());
+        r.on_datagram(ms(t, 2), addr(A), &sent(1, 5000, Buttons::NONE));
+        // Sent every 33 ms from 33 ms; the first half delivered at 2000 ms, the rest at 3500 ms.
+        for (seq, at) in (2..).zip((33..3000u32).step_by(33)) {
+            let delivered = if at < 1500 { 2000 } else { 3500 };
+            assert_eq!(
+                r.on_datagram(
+                    ms(t, delivered),
+                    addr(A),
+                    &sent(seq, 5000 + at, Buttons::START)
+                ),
+                Accept::Late,
+                "sent at {at} ms, delivered at {delivered} ms"
+            );
+        }
+    }
+
+    /// After the client counted as gone, a duplicate or reordered datagram from it is judged by its
+    /// clock, not taken as a restart: that would forget the clock and let the backlog behind drive.
+    #[test]
+    fn an_old_seq_after_a_silence_is_judged_by_the_streams_clock() {
+        let (mut r, t) = (rx(), Instant::now());
+        r.on_datagram(ms(t, 2), addr(A), &sent(10, 5000, Buttons::NONE));
+        tick(r.poll(ms(t, 2)));
+        assert_eq!(r.poll(ms(t, 300)), Step::Gone);
+        for seq in [10, 9] {
+            assert_eq!(
+                r.on_datagram(ms(t, 2000), addr(A), &sent(seq, 5000, Buttons::NONE)),
+                Accept::Late,
+                "seq {seq}"
+            );
+        }
+        assert_eq!(
+            r.on_datagram(ms(t, 2000), addr(A), &sent(11, 5033, Buttons::START)),
+            Accept::Late
+        );
     }
 
     /// A restarted sender is a new stream with its own clock, and is not judged by the old one's.

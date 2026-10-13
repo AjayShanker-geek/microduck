@@ -271,8 +271,9 @@ added to `robot.health` reaches this report without a change to the format.
   pressed in it fire nothing: it says what the pad did, not what it does. The count is logged at
   most once every 10 seconds. A stream is the same sender continuing its `seq`, across a silence
   too, so a backlog that arrives after the client counted as gone is still dropped; a restarted
-  sender is a new one, judged by its own clock. Late without a break for a whole second is the
-  sender's clock having moved, not a backlog, and the stream is taken again.
+  sender is a new one, judged by its own clock. Late by the same amount for a whole second is the
+  sender's clock having moved, not a backlog — a backlog drains in bursts, each far less late than
+  the one before — and the stream is taken again.
 - **The first sender holds it.** The robot locks to the address of the first datagram it accepts and
   drops datagrams from any other address until that one has been silent for `timeout_ms`, so two
   people driving honestly cannot fight over one duck. It is not protection: see [trust](#trust).
