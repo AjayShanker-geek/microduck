@@ -586,6 +586,30 @@ pub const JOINT_IDS: [u8; 15] = [
     10, 11, 12, 13, 14, // right leg
 ];
 
+/// The home pose, radians, indexed as [`JOINT_NAMES`]: where the policies stand the robot, and
+/// what they observe joint positions relative to. `duck-control` re-exports it as
+/// `DEFAULT_POSITION`, which says why each number is what it is.
+///
+/// Here because a client draws the robot too: `robotctl vetbook` poses the 3D duck with it, and
+/// `robotctl` does not link `duck-control` and the ONNX Runtime that comes with it.
+pub const HOME_POSE: [f64; 15] = [
+    0.0,     // left_hip_yaw
+    -0.0873, // left_hip_roll
+    -0.4579, // left_hip_pitch
+    -0.0049, // left_knee
+    0.4530,  // left_ankle
+    0.3491,  // neck_pitch
+    0.3491,  // head_pitch
+    0.0,     // head_yaw
+    0.0,     // head_roll
+    0.0,     // mouth
+    0.0,     // right_hip_yaw
+    0.0873,  // right_hip_roll
+    0.4579,  // right_hip_pitch
+    0.0049,  // right_knee
+    -0.4530, // right_ankle
+];
+
 /// The joint a Dynamixel ID drives, if it is one of [`JOINT_IDS`].
 pub fn joint_of(id: u8) -> Option<&'static str> {
     JOINT_IDS

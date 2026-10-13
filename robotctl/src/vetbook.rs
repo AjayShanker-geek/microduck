@@ -39,10 +39,21 @@ const LILAC: Color = Color::Indexed(141);
 const DIM: Color = Color::Indexed(244);
 const ALERT: Color = Color::Indexed(203);
 
-/// A microduck's head, side on: the rounded shell, the one big camera eye at the front, and the
-/// flat beak underneath, sticking out past it.
-const HEAD_ART: [&str; 4] = [" ╭───────╮ ", " │   (◉) │ ", " ╰───────╯ ", "▀▀▀▀▀▀▀▀▀▀▀▀"];
-const SHELL: Color = Color::Indexed(252);
+/// The patient card's height, borders included: seven lines.
+const HEADER_HEIGHT: u16 = 9;
+
+/// The patient panel on the Life tab: its width, and the page width below which it is left out
+/// rather than squeezed. The monitor's renderer wants room — at a header's ten rows the duck is
+/// twenty pixels tall, a smudge on a floor — so it gets the tab's whole height, or nothing.
+const PATIENT_WIDTH: u16 = 42;
+const PATIENT_MIN_PAGE: u16 = 130;
+
+/// How fast the duck turns on the exam table, radians per second.
+const TURNTABLE: f32 = 0.6;
+
+/// How often the page redraws: the turntable wants frames, the book only changes every
+/// [`REFRESH`].
+const FRAME: Duration = Duration::from_millis(80);
 
 pub fn run(robot_socket: &Path, config_socket: &Path, json: bool) -> Result<(), Failure> {
     let book = fetch(robot_socket)?;
@@ -136,6 +147,8 @@ struct Page {
     /// Why the last refresh failed, shown in the footer while the old book stays up.
     stale: Option<String>,
     now: i64,
+    /// The 3D duck in the header, and where its turntable has got to.
+    duck: crate::duck::DuckView,
     /// A diary line being typed, while `n` has the keyboard.
     draft: Option<String>,
     /// What came of the last line written, shown in the footer for a few seconds.
@@ -158,15 +171,19 @@ fn live(
         now: crate::unix_now(),
         draft: None,
         written: None,
+        duck: crate::duck::DuckView::new(),
     };
     let mut fetched = Instant::now();
+    let mut turned = Instant::now();
     loop {
+        page.duck.orbit(TURNTABLE * turned.elapsed().as_secs_f32());
+        turned = Instant::now();
         page.now = crate::unix_now();
         terminal
             .draw(|frame| page.render(frame.area(), frame.buffer_mut()))
             .map_err(|e| Failure::new(exit::FAILED, format!("cannot draw: {e}")))?;
 
-        let wait = REFRESH.saturating_sub(fetched.elapsed());
+        let wait = REFRESH.saturating_sub(fetched.elapsed()).min(FRAME);
         if event::poll(wait).unwrap_or(false)
             && let Ok(Event::Key(key)) = event::read()
             && key.kind == KeyEventKind::Press
@@ -256,7 +273,7 @@ fn live(
 impl Page {
     fn render(&mut self, area: Rect, buf: &mut Buffer) {
         let [header, tabs, body, footer] = Layout::vertical([
-            Constraint::Length(6),
+            Constraint::Length(HEADER_HEIGHT),
             Constraint::Length(1),
             Constraint::Min(8),
             Constraint::Length(1),
@@ -276,7 +293,20 @@ impl Page {
             .render(tabs, buf);
 
         match self.tab {
-            Tab::Life => self.render_life(body, buf),
+            Tab::Life => {
+                let body = if body.width >= PATIENT_MIN_PAGE {
+                    let [patient, rest] = Layout::horizontal([
+                        Constraint::Length(PATIENT_WIDTH),
+                        Constraint::Min(60),
+                    ])
+                    .areas(body);
+                    self.render_patient(patient, buf);
+                    rest
+                } else {
+                    body
+                };
+                self.render_life(body, buf)
+            }
             Tab::Motors => self.render_motors(body, buf),
             Tab::Diary => self.render_diary(body, buf),
         }
@@ -322,30 +352,13 @@ impl Page {
         Line::from(keys).render(footer, buf);
     }
 
+    /// The patient card: the few lines a vet would read first.
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(DUCK));
-        let inner = block.inner(area);
+        let text = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
         block.render(area, buf);
-        let [art, text] =
-            Layout::horizontal([Constraint::Length(14), Constraint::Min(10)]).areas(inner);
-
-        // The shell in white, the lens ringed in orange, the beak orange.
-        let shell = Style::new().fg(SHELL);
-        let art_lines = vec![
-            Line::styled(HEAD_ART[0], shell),
-            Line::from(vec![
-                Span::styled(" │   ", shell),
-                Span::styled("(", Style::new().fg(BEAK).bold()),
-                Span::styled("◉", Style::new().fg(POND).bold()),
-                Span::styled(")", Style::new().fg(BEAK).bold()),
-                Span::styled(" │ ", shell),
-            ]),
-            Line::styled(HEAD_ART[2], shell),
-            Line::styled(HEAD_ART[3], Style::new().fg(BEAK)),
-        ];
-        Paragraph::new(art_lines).render(art, buf);
 
         let b = &self.book;
         let life = &b.life;
@@ -356,46 +369,74 @@ impl Page {
         };
         let days = (self.now - b.opened as i64).max(0) / 86_400;
         let (verdict, colour) = verdict(b);
-        let lines = vec![
+        let dim = |t: &str| Span::styled(t.to_owned(), Style::new().fg(DIM));
+        let bold = |t: String| Span::styled(t, Style::new().bold());
+
+        let mut lines = vec![
+            Line::styled(title, Style::new().fg(DUCK).bold()),
             Line::from(vec![
-                Span::styled(title, Style::new().fg(DUCK).bold()),
-                Span::styled(
-                    format!("   opened {}", date(b.opened as i64)),
-                    Style::new().fg(DIM),
-                ),
+                dim("opened "),
+                bold(date(b.opened as i64)),
+                dim(&format!(
+                    " · {days} day{} in the book",
+                    plural(days as usize)
+                )),
             ]),
             Line::from(vec![
-                Span::styled(hours(life.powered_s), Style::new().bold()),
-                Span::styled(" awake  ·  ", Style::new().fg(DIM)),
-                Span::styled(distance(life.distance_m), Style::new().bold()),
-                Span::styled(" walked  ·  ", Style::new().fg(DIM)),
-                Span::styled(format!("{days}"), Style::new().bold()),
-                Span::styled(
-                    if days == 1 { " day " } else { " days " },
-                    Style::new().fg(DIM),
-                ),
-                Span::styled("in the book", Style::new().fg(DIM)),
+                bold(hours(life.powered_s)),
+                dim(" awake · "),
+                bold(hours(life.torqued_s)),
+                dim(" on its feet · "),
+                bold(distance(life.distance_m)),
+                dim(" walked"),
             ]),
             Line::from(vec![
-                Span::styled(format!("{}", life.boots), Style::new().bold()),
-                Span::styled(" boots  ·  ", Style::new().fg(DIM)),
-                Span::styled(format!("{}", life.updates), Style::new().bold()),
-                Span::styled(" updates  ·  on ", Style::new().fg(DIM)),
-                Span::styled(
-                    if b.last_version.is_empty() {
-                        "?".to_owned()
-                    } else {
-                        b.last_version.clone()
-                    },
-                    Style::new().bold(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("vet says: ", Style::new().fg(DIM)),
-                Span::styled(verdict, Style::new().fg(colour).bold()),
+                bold(format!("{}", life.falls)),
+                dim(" falls · "),
+                bold(format!("{}", life.pickups)),
+                dim(" pickups · "),
+                bold(format!("{}", life.pets)),
+                dim(" pets"),
             ]),
         ];
+        if let Some((skill, n)) = life.skills.iter().max_by_key(|(_, n)| **n) {
+            lines.push(Line::from(vec![
+                dim("favourite trick "),
+                Span::styled(skill.clone(), Style::new().fg(BEAK).bold()),
+                dim(&format!(" ×{n}")),
+            ]));
+        }
+        let swaps: usize = b.motors.iter().map(|m| m.retired.len()).sum();
+        lines.push(Line::from(vec![
+            bold(format!("{swaps}")),
+            dim(&format!(" servo{} replaced · ", plural(swaps))),
+            bold(format!("{}", life.boots)),
+            dim(" boots · "),
+            bold(format!("{}", life.updates)),
+            dim(" updates · on "),
+            bold(if b.last_version.is_empty() {
+                "?".to_owned()
+            } else {
+                b.last_version.clone()
+            }),
+        ]));
+        lines.push(Line::from(vec![
+            dim("vet says  "),
+            Span::styled(verdict, Style::new().fg(colour).bold()),
+        ]));
         Paragraph::new(lines).render(text, buf);
+    }
+
+    /// The duck itself, turning slowly on the exam table: the model, renderer and home pose
+    /// `robotctl monitor` draws, standing upright.
+    fn render_patient(&mut self, area: Rect, buf: &mut Buffer) {
+        let block = panel("the patient");
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if let Some(model) = crate::duck::model() {
+            self.duck
+                .draw(model, &proto::HOME_POSE, [0.0, 0.0, -1.0], &[], inner, buf);
+        }
     }
 
     fn render_life(&self, area: Rect, buf: &mut Buffer) {
@@ -539,7 +580,7 @@ impl Page {
             ("☀", "wake-ups", format!("{}", life.wake_ups), LEAF),
             ("⇡", "pickups", format!("{}", life.pickups), BLUSH),
             ("♥", "pets", format!("{}", life.pets), BLUSH),
-            ("⤓", "falls", format!("{}", life.falls), ALERT),
+            ("↓", "falls", format!("{}", life.falls), ALERT),
             (
                 "❀",
                 "soft landings",
@@ -551,8 +592,8 @@ impl Page {
             ("▴", "stand-ups", format!("{}", life.stand_ups), POND),
             ("♪", "songs", format!("{}", life.songs), LILAC),
             ("♫", "theremin", hours(life.theremin_s), LILAC),
-            ("⏻", "power-offs", format!("{}", life.power_offs), DIM),
-            ("⟳", "servo reboots", format!("{}", life.motor_reboots), DIM),
+            ("○", "power-offs", format!("{}", life.power_offs), DIM),
+            ("↺", "servo reboots", format!("{}", life.motor_reboots), DIM),
         ];
         for (skill, n) in &life.skills {
             tiles_list.push(("★", skill.as_str(), format!("{n}"), BEAK));
@@ -1244,6 +1285,7 @@ mod tests {
             now: 1_760_300_000,
             draft: draft.map(str::to_owned),
             written: None,
+            duck: crate::duck::DuckView::new(),
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(width, 40)).unwrap();
         terminal
@@ -1292,6 +1334,32 @@ mod tests {
                 std::fs::write(format!("{dir}/{name}-{width}.txt"), draw(tab, width)).unwrap();
             }
         }
+        // Every cell with its colours, for a script to turn into a picture.
+        let mut page = Page {
+            book: sample(),
+            name: "lavender-star".into(),
+            tab: Tab::Life,
+            motors: TableState::default(),
+            diary_scroll: 0,
+            stale: None,
+            now: 1_760_300_000,
+            draft: None,
+            written: None,
+            duck: crate::duck::DuckView::new(),
+        };
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|f| page.render(f.area(), f.buffer_mut()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut cells = Vec::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let c = &buf[(x, y)];
+                cells.push(format!("{}\t{:?}\t{:?}", c.symbol(), c.fg, c.bg));
+            }
+        }
+        std::fs::write(format!("{dir}/cells-120x40.tsv"), cells.join("\n")).unwrap();
         let typing = draw_with(Tab::Diary, 100, Some("new feet, and the left knee"));
         std::fs::write(format!("{dir}/typing-100.txt"), typing).unwrap();
     }
