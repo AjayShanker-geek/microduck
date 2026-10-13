@@ -51,6 +51,7 @@ mod led;
 mod monitor;
 mod path_map;
 mod show;
+mod vetbook;
 
 /// Exit codes. Stable — CI asserts on these.
 mod exit {
@@ -173,6 +174,22 @@ enum Namespace {
     /// is generated from its SoC serial, so the one that answers — in a voice that is only
     /// its own — is the one you're SSH'd into.
     Quack,
+
+    /// The duck's vet book: its whole life in numbers.
+    ///
+    /// Hours awake, walking, standing and sitting; metres walked; falls, pickups, pets and
+    /// skills; and every servo — how long the one in each joint has run, how hot it has been,
+    /// what it has tripped on, and how long the ones before it lasted. `robotd` keeps it in
+    /// `/var/lib/robot/vetbook.json`, so it survives updates and lasts the life of the robot.
+    /// A servo swap is written down by itself, when `robotd` adopts a factory-fresh servo.
+    ///
+    /// On a terminal it opens a live page (`q` quits, `←`/`→` tabs, `n` writes a dated line in
+    /// the diary); piped, it prints plain text.
+    Vetbook {
+        /// The book as JSON, exactly as `robot.vetbook` answers it.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Switch the flashlight — the beta face's RGB LED. `robotd` owns it, so this asks rather than
     /// writing the LED (`robotctl led` is the bench tool that writes it directly).
@@ -5280,6 +5297,9 @@ fn run(cli: Cli) -> Result<(), Failure> {
         }
         Namespace::Version { json } => {
             return run_version(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
+        }
+        Namespace::Vetbook { json } => {
+            return vetbook::run(&cli.robot_socket, &cli.config_socket, json);
         }
         Namespace::Monitor { hz, json } => {
             return monitor::run(

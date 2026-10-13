@@ -451,7 +451,13 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// for servo power being off — about a robot whose fifteen servos had just answered their pings.
 /// Additive: absent from an older `robotd`, and `false` reads as "not told", which is what the old
 /// wording assumed anyway.
-pub const API_VERSION: u32 = 41;
+///
+/// # v42 — the vet book
+///
+/// [`method::ROBOT_VETBOOK`] and [`method::ROBOT_VETBOOK_NOTE`]: the robot's lifetime record —
+/// hours on, distance walked, falls and pickups, every servo `robotd` has adopted and how long
+/// the one before it lasted, and dated notes ([`vetbook`]). New routes: a `robotd` predating them answers METHOD_NOT_FOUND, by name.
+pub const API_VERSION: u32 = 42;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -487,6 +493,7 @@ pub const UPDATE_MAX_SILENCE_SECONDS: u64 = 600;
 pub const DEFAULT_SOCKET: &str = "/run/updaterd.sock";
 
 pub mod led;
+pub mod vetbook;
 
 /// Where each service listens by default.
 ///
@@ -775,6 +782,11 @@ pub mod method {
     /// The static geometry [`RobotState::frames`] and [`TofFrame`] are stated in — see
     /// [`ModelResult`]. A read; asked once per session.
     pub const ROBOT_MODEL: &str = "robot.model";
+
+    /// The vet book: the robot's lifetime record — see [`crate::vetbook`]. A read.
+    pub const ROBOT_VETBOOK: &str = "robot.vetbook";
+    /// A dated line of free text in the vet book. Kept for the life of the robot.
+    pub const ROBOT_VETBOOK_NOTE: &str = "robot.vetbookNote";
 
     /// Put a different `.onnx` in one slot, or drop an override and go back to the default.
     ///
@@ -1095,6 +1107,10 @@ pub enum Call {
     RobotPolicies,
     /// Static robot geometry for a mapper; see [`method::ROBOT_MODEL`].
     RobotModel,
+    /// The lifetime record; see [`method::ROBOT_VETBOOK`].
+    RobotVetbook,
+    /// Write a note in it; see [`method::ROBOT_VETBOOK_NOTE`].
+    RobotVetbookNote(vetbook::VetbookNoteParams),
     /// Load one slot, or reset it; see [`method::ROBOT_LOAD_POLICY`].
     RobotLoadPolicy(LoadPolicyParams),
     /// Re-read every slot from disk; see [`method::ROBOT_RELOAD_POLICIES`].
@@ -1264,6 +1280,8 @@ impl Call {
             Call::RobotSetMode(_) => method::ROBOT_SET_MODE,
             Call::RobotPolicies => method::ROBOT_POLICIES,
             Call::RobotModel => method::ROBOT_MODEL,
+            Call::RobotVetbook => method::ROBOT_VETBOOK,
+            Call::RobotVetbookNote(_) => method::ROBOT_VETBOOK_NOTE,
             Call::RobotLoadPolicy(_) => method::ROBOT_LOAD_POLICY,
             Call::RobotReloadPolicies => method::ROBOT_RELOAD_POLICIES,
             Call::PolicyCheck => method::POLICY_CHECK,
@@ -1422,7 +1440,10 @@ impl Call {
             | Call::RobotRemoteSessionActive
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
             | Call::RobotMode => (Robot, Prompt),
+            // A small write to a file `robotd` already owns, done on the IPC side.
+            Call::RobotVetbookNote(_) => (Robot, Prompt),
             // Intents and one-shot skills. All fast: they store a value the control loop reads on
             // its next tick, and none of them waits for the robot to finish anything.
             Call::RobotMove(_)
@@ -1556,6 +1577,7 @@ impl Call {
             Call::AccountLogin(p) => encode(p),
             Call::RobotSound(p) => encode(p),
             Call::RobotFlashlight(p) => encode(p),
+            Call::RobotVetbookNote(p) => encode(p),
             Call::RobotTheremin(p) => encode(p),
             Call::RobotChorale(p) => encode(p),
             Call::ChoraleBeaconSet(p) => encode(p),
@@ -1585,6 +1607,7 @@ impl Call {
             | Call::RobotShutdown
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
             | Call::RobotReloadPolicies
             | Call::PolicyCheck
             | Call::DetectorCheck
@@ -1659,6 +1682,8 @@ impl Call {
             method::ROBOT_SET_MODE => Call::RobotSetMode(decode(params)?),
             method::ROBOT_POLICIES => Call::RobotPolicies,
             method::ROBOT_MODEL => Call::RobotModel,
+            method::ROBOT_VETBOOK => Call::RobotVetbook,
+            method::ROBOT_VETBOOK_NOTE => Call::RobotVetbookNote(decode(params)?),
             method::ROBOT_LOAD_POLICY => Call::RobotLoadPolicy(decode(params)?),
             method::ROBOT_RELOAD_POLICIES => Call::RobotReloadPolicies,
             method::POLICY_CHECK => Call::PolicyCheck,
@@ -1822,6 +1847,10 @@ pub mod test_support {
             Call::RobotMode,
             Call::RobotPolicies,
             Call::RobotModel,
+            Call::RobotVetbook,
+            Call::RobotVetbookNote(vetbook::VetbookNoteParams {
+                text: "reglued the beak".into(),
+            }),
             Call::RobotReloadPolicies,
             Call::PolicyCheck,
             Call::PolicyInstall(PolicyInstallParams {
@@ -5738,7 +5767,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            69,
+            71,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }

@@ -30,6 +30,7 @@ mod posture;
 mod soc;
 mod sound;
 mod theremin;
+mod vetbook;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -277,6 +278,12 @@ struct Args {
     /// Report that it is not safe to restart, as if the robot were moving.
     #[arg(long)]
     busy: bool,
+
+    /// Where the vet book lives — the robot's lifetime record (`vetbook.rs`). Defaults to
+    /// `/var/lib/robot/vetbook.json` on a robot; under `--fake` and `--sim` the book is kept in
+    /// memory unless this names a file, so a laptop running the twin writes nothing to `/var/lib`.
+    #[arg(long)]
+    vetbook: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -699,6 +706,10 @@ struct RobotState {
     /// [`control::Controller::busy`] already draws.
     sitting: AtomicBool,
 
+    /// The vet book: the robot's lifetime record. The loop hands it what it counted once a second
+    /// and never waits for it — see [`vetbook`].
+    vetbook: vetbook::Book,
+
     period_us: u64,
     min_achieved_hz: f64,
     stall_periods: u32,
@@ -761,6 +772,8 @@ impl RobotState {
             moving: AtomicBool::new(false),
             homed: AtomicBool::new(false),
             sitting: AtomicBool::new(false),
+            // In memory until `main` opens the robot's own; tests keep it that way.
+            vetbook: vetbook::Book::open(None, env!("CARGO_PKG_VERSION")),
             period_us: params.period().as_micros() as u64,
             min_achieved_hz: params.update_gate.min_achieved_hz,
             stall_periods: params.update_gate.stall_periods,
@@ -1044,12 +1057,12 @@ async fn main() -> ExitCode {
     };
     duck_ipc_proto::log_startup_identity!("robotd");
 
-    let state = Arc::new(RobotState::new(
-        &params,
-        &params_path,
-        args.unhealthy,
-        args.busy,
-    ));
+    let mut state = RobotState::new(&params, &params_path, args.unhealthy, args.busy);
+    let vetbook_path = args.vetbook.clone().or_else(|| {
+        (!args.fake && args.sim.is_none()).then(|| PathBuf::from(vetbook::DEFAULT_PATH))
+    });
+    state.vetbook = vetbook::Book::open(vetbook_path, env!("CARGO_PKG_VERSION"));
+    let state = Arc::new(state);
 
     if args.unhealthy {
         tracing::warn!("--unhealthy: will report unhealthy, so updates will roll back");
@@ -1088,6 +1101,18 @@ async fn main() -> ExitCode {
     };
 
     let leds = tokio::spawn(leds::run(Arc::clone(&state)));
+    let vetbook_saver = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let mut every = tokio::time::interval(vetbook::SAVE_INTERVAL);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                let state = Arc::clone(&state);
+                let _ = tokio::task::spawn_blocking(move || state.vetbook.save()).await;
+            }
+        }
+    });
 
     let serving = serve(
         Arc::clone(&state),
@@ -1111,6 +1136,9 @@ async fn main() -> ExitCode {
     state.shutdown.store(true, Ordering::Relaxed);
     state.leds_changed.notify_one();
     let _ = control.join();
+    // After the loop, which hands over its last second of counting as it stops.
+    vetbook_saver.abort();
+    state.vetbook.save();
     // Bounded: an LED write that hangs on the expander must not hold the daemon up.
     let _ = tokio::time::timeout(Duration::from_secs(1), leds).await;
     let _ = std::fs::remove_file(&args.socket);
@@ -1123,7 +1151,20 @@ fn run_init(params: &Params, duration: Duration) -> ExitCode {
     // The same open as the daemon's, replacement adoption included: `init` is what someone
     // reaches for right after a motor swap, and it must not be the one path that refuses the
     // new servo.
-    let Some(mut io) = open_bus(&params.bus, params.board.version, 0, &mut Vec::new()) else {
+    let mut adopted = None;
+    let opened = open_bus(
+        &params.bus,
+        params.board.version,
+        0,
+        &mut Vec::new(),
+        &mut adopted,
+    );
+    // The daemon is stopped while `init` runs — it holds the same lock — so the book is this
+    // process's to write.
+    if let Some(id) = adopted {
+        vetbook::Book::load(Some(PathBuf::from(vetbook::DEFAULT_PATH))).adopted(id);
+    }
+    let Some(mut io) = opened else {
         return ExitCode::FAILURE;
     };
     if let Err(e) = io.set_torque(true) {
@@ -1332,7 +1373,14 @@ async fn open_bus_waiting(bus: &params::Bus, state: &RobotState) -> Option<BusIo
         // quiet thereafter — a board waiting overnight must not fill the journal.
         let mut missing = Vec::new();
         let mut imu_missing = false;
-        if let Some(mut io) = open_bus(bus, state.board, attempt, &mut missing) {
+        let mut adopted = None;
+        let opened = open_bus(bus, state.board, attempt, &mut missing, &mut adopted);
+        // Written down whether or not the rest of the bring-up works: the servo is in the joint
+        // now, flashed to its ID, and the next attempt will not see it as new.
+        if let Some(id) = adopted {
+            state.vetbook.adopted(id);
+        }
+        if let Some(mut io) = opened {
             match imu_answers(&mut io, attempt) {
                 Some(true) => {
                     state.startup_bus_failures.store(0, Ordering::Relaxed);
@@ -1382,6 +1430,7 @@ fn open_bus(
     board: robotd_params::board::Board,
     attempt: u32,
     missing: &mut Vec<u8>,
+    adopted: &mut Option<u8>,
 ) -> Option<BusIo> {
     // First attempt and every thirtieth — about one line per 30 s while waiting.
     let loud = attempt == 0 || attempt.is_multiple_of(STARTUP_READ_LOG_EVERY);
@@ -1403,7 +1452,7 @@ fn open_bus(
     if !bus.fast_sync_read && loud {
         tracing::warn!("bus.fast_sync_read is off; every sync read is a plain one");
     }
-    if !adopt_missing_servo(&mut io, loud, missing) {
+    if !adopt_missing_servo(&mut io, loud, missing, adopted) {
         return None;
     }
     match io.check_registers() {
@@ -1474,7 +1523,12 @@ fn imu_answers(_io: &mut BusIo, _attempt: u32) -> Option<bool> {
 /// unpowered, a servo missing with nothing fresh to replace it, or two missing at once, which
 /// cannot be told apart and is left to a human.
 #[cfg(target_os = "linux")]
-fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool {
+fn adopt_missing_servo(
+    io: &mut BusIo,
+    loud: bool,
+    silent: &mut Vec<u8>,
+    adopted: &mut Option<u8>,
+) -> bool {
     use duck_control::bus::replacement_target;
 
     let missing = match io.missing_servos() {
@@ -1507,7 +1561,10 @@ fn adopt_missing_servo(io: &mut BusIo, loud: bool, silent: &mut Vec<u8>) -> bool
         return false;
     };
     match io.adopt_replacement(id) {
-        Ok(true) => true,
+        Ok(true) => {
+            *adopted = Some(id);
+            true
+        }
         Ok(false) => {
             if loud {
                 tracing::error!(
@@ -1533,6 +1590,7 @@ fn open_bus(
     _board: robotd_params::board::Board,
     _attempt: u32,
     _missing: &mut Vec<u8>,
+    _adopted: &mut Option<u8>,
 ) -> Option<BusIo> {
     tracing::error!("no bus on this platform; use --fake");
     None
@@ -2067,6 +2125,16 @@ async fn control_loop<T: RobotIo>(
     // Loaded once here and again on a mode switch — see `build_controller`.
     let mut controller = build_controller(&policy_cfg, params.safety.limp_fall, &state);
 
+    // The vet book's tally for this process, and what each servo says it is. Read once, here,
+    // before the loop has a deadline to keep: a servo is not going to change model mid-run.
+    let mut vettally = vetbook::Tracker::default();
+    match safety.servo_identity() {
+        Ok(Some(ids)) => state.vetbook.identify(&ids),
+        Ok(None) => {}
+        Err(e) => tracing::debug!(error = %e, "vet book: servo identity read failed"),
+    }
+    let mut last_alert_read = Instant::now();
+
     tracing::warn!(
         joints = NUM_JOINTS,
         hz = 1.0 / period.as_secs_f64(),
@@ -2450,6 +2518,7 @@ async fn control_loop<T: RobotIo>(
             if let Err(e) = safety.set_torque(false) {
                 tracing::warn!(error = %e, "robot.rebootMotors: torque off failed on a servo; rebooting anyway");
             }
+            vettally.motor_reboot();
             match safety.reboot_motors(&ids) {
                 Ok(()) => tracing::warn!(
                     ?ids,
@@ -2538,6 +2607,7 @@ async fn control_loop<T: RobotIo>(
                 while let Some(ev) = pet.try_recv_event() {
                     match ev {
                         pet_detect::PettingEvent::Start => {
+                            vettally.pet();
                             let calm =
                                 !safety.fallen() && controller.as_ref().is_none_or(|c| !c.busy());
                             if calm {
@@ -2840,6 +2910,7 @@ async fn control_loop<T: RobotIo>(
                 intents.set_enabled(false);
                 bringup = Bringup::Limp;
                 powered_off = true;
+                vettally.power_off();
                 poweroff();
             }
         }
@@ -2874,6 +2945,7 @@ async fn control_loop<T: RobotIo>(
                     intents.set_enabled(false);
                     bringup = Bringup::Limp;
                     powered_off = true;
+                    vettally.power_off();
                     poweroff();
                 }
                 _ => {}
@@ -3734,6 +3806,21 @@ async fn control_loop<T: RobotIo>(
             Err(e) => tracing::warn!(error = %e, "bus write failed"),
         }
 
+        vettally.tick(&vetbook::Facts {
+            dt,
+            torqued: bringup != Bringup::Limp && !powered_off,
+            label: &policy_label,
+            twist: command.twist,
+            in_hands: pickup_paused,
+            fallen: safety.fallen(),
+            limp_falling: matches!(limp_fall, LimpFall::Limp { .. }),
+            theremin: theremin_state.is_some(),
+            singing: chorale_state.as_ref().is_some_and(|c| c.part.is_some()),
+            odom: (odometry.position(), odometry.yaw()),
+            fresh: fresh.as_ref(),
+            overran: tick_start.elapsed() > period,
+        });
+
         // Only assemble a frame when somebody is subscribed. On a robot nobody usually is,
         // and this would otherwise be a per-tick allocation on the thread that should not
         // be visiting the allocator without a reason.
@@ -3815,7 +3902,25 @@ async fn control_loop<T: RobotIo>(
             window_start = Instant::now();
             window_ticks = 0;
 
-            publish_slow_sensors(&mut safety, &state);
+            let temps = publish_slow_sensors(&mut safety, &state);
+            let volts = f64::from_bits(state.battery_v.load(Ordering::Relaxed));
+            vettally.slow(
+                temps.as_ref(),
+                volts,
+                f64::from_bits(state.cpu_temp_c.load(Ordering::Relaxed)),
+                window.as_secs_f64(),
+            );
+            // The servos' latched alerts, for the vet book. A third small transaction, so not on
+            // every second: a latch holds until a reboot, and ten seconds cannot miss one.
+            if last_alert_read.elapsed() >= vetbook::ALERT_INTERVAL {
+                last_alert_read = Instant::now();
+                match safety.hardware_errors() {
+                    Ok(Some(alerts)) => vettally.alerts(&alerts),
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!(error = %e, "vet book: hardware error read failed"),
+                }
+            }
+            vettally.handoff(&state.vetbook, volts, false);
 
             if last_summary.elapsed() >= LOOP_SUMMARY_INTERVAL {
                 tracing::info!(
@@ -3846,6 +3951,12 @@ async fn control_loop<T: RobotIo>(
             }
         }
     }
+    // The last second's counting, waiting for the book this once: the loop has no deadline left.
+    vettally.handoff(
+        &state.vetbook,
+        f64::from_bits(state.battery_v.load(Ordering::Relaxed)),
+        true,
+    );
     tracing::info!("control loop stopped");
 }
 
@@ -3948,7 +4059,11 @@ fn limit_name(limit: duck_control::safety::Limit) -> &'static str {
 /// the bus: a transaction issued from the IPC side would interleave bytes with a tick and
 /// corrupt both. The IMU counters come from the same `io`, so they are mirrored here rather
 /// than reached for from the socket.
-fn publish_slow_sensors<T: RobotIo>(io: &mut Safety<T>, state: &RobotState) {
+/// Returns this sample's per-joint temperatures, `None` when the bus read missed.
+fn publish_slow_sensors<T: RobotIo>(
+    io: &mut Safety<T>,
+    state: &RobotState,
+) -> Option<[f64; NUM_JOINTS]> {
     let stale = io.imu_stale();
     state.imu_stale_blocks.store(stale.total, Ordering::Relaxed);
     state.imu_stale_run.store(stale.run, Ordering::Relaxed);
@@ -3996,11 +4111,15 @@ fn publish_slow_sensors<T: RobotIo>(io: &mut Safety<T>, state: &RobotState) {
                 .motor_mean_c
                 .store(mean_c.to_bits(), Ordering::Relaxed);
             state.motor_hottest.store(hottest as u32, Ordering::Relaxed);
+            Some(slow.temps_c)
         }
         // Keep the last sample. A single failed transaction is ordinary on a serial bus, and
         // dropping to "unknown" over one would make the reported battery flicker. A bus that
         // is really gone already shows up in the verdict and in `bus.consecutive_errors`.
-        Err(e) => tracing::debug!(error = %e, "slow-sensor read failed; keeping the last sample"),
+        Err(e) => {
+            tracing::debug!(error = %e, "slow-sensor read failed; keeping the last sample");
+            None
+        }
     }
 }
 
@@ -5155,6 +5274,16 @@ fn dispatch(
         // The geometry the mapping fields of `robot.state` are stated in. Constant for the
         // life of the process, read from the same asset the FK runs on.
         proto::Call::RobotModel => proto::Response::ok(Some(id), &mapping::model()),
+
+        // The vet book, as of the loop's last handoff — at most a second behind.
+        proto::Call::RobotVetbook => proto::Response::ok(Some(id), &state.vetbook.snapshot()),
+        proto::Call::RobotVetbookNote(p) => {
+            let result = match state.vetbook.note(&p.text) {
+                Ok(()) => proto::IntentResult::accepted(),
+                Err(e) => proto::IntentResult::refused(e),
+            };
+            proto::Response::ok(Some(id), &result)
+        }
 
         proto::Call::RobotPolicies => proto::Response::ok(
             Some(id),
