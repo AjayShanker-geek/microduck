@@ -109,6 +109,109 @@ pub struct Life {
     /// Lowest and highest smoothed pack voltage seen. Zero lowest means never read.
     pub lowest_volts: f64,
     pub highest_volts: f64,
+
+    /// Personal records and counters, by name — see [`key`] for every name and its unit.
+    ///
+    /// Maps rather than fields so a record can be added by the daemon that measures it and read by
+    /// the card that shows it without either changing this format. Three, because they merge three
+    /// ways: `tallies` add up, `highs` keep the largest ever, `lows` the smallest.
+    pub tallies: BTreeMap<String, f64>,
+    pub highs: BTreeMap<String, f64>,
+    pub lows: BTreeMap<String, f64>,
+}
+
+/// The names in [`Life::tallies`], [`Life::highs`] and [`Life::lows`], and who measures each.
+///
+/// The unit is the suffix. A daemon reporting one of these does so through `robot.vetbookTally`
+/// ([`VetbookTallyParams`]); `robotd`'s own go straight into its tally.
+pub mod key {
+    // ── tallies, robotd ──
+    /// The robot upside down: trunk up pointing more than 120° from the world's.
+    pub const UPSIDE_DOWN_S: &str = "upside_down_s";
+    /// The flashlight on, and how many times it was switched on.
+    pub const FLASHLIGHT_S: &str = "flashlight_s";
+    pub const FLASHLIGHT_ON: &str = "flashlight_on";
+    /// Sounds the voice played: quacks, chirps, coos.
+    pub const SOUNDS: &str = "sounds";
+    /// The beak opening past halfway.
+    pub const BEAK_FLAPS: &str = "beak_flaps";
+    /// Policy loads and mode switches: gaits tried on.
+    pub const GAIT_CHANGES: &str = "gait_changes";
+    /// The board's clock held below its ceiling by the thermal governor.
+    pub const THROTTLED_S: &str = "throttled_s";
+    /// Powered time since the last charge `robotd` noticed — bookkeeping for
+    /// [`ON_ONE_CHARGE_S`], not a stat.
+    pub const SINCE_CHARGE_S: &str = "since_charge_s";
+
+    // ── highs, robotd ──
+    /// The fastest the trunk has ever spun, any axis, degrees per second.
+    pub const SPIN_DPS: &str = "spin_dps";
+    /// Top walking speed over the ground, from odometry over one second.
+    pub const TOP_SPEED_MPS: &str = "top_speed_mps";
+    /// The longest distance walked between two falls.
+    pub const WALK_STREAK_M: &str = "walk_streak_m";
+    /// The steepest tilt the robot came back from without the fall verdict.
+    pub const TILT_SURVIVED_DEG: &str = "tilt_survived_deg";
+    /// The most current one servo has drawn at once.
+    pub const PEAK_CURRENT_A: &str = "peak_current_a";
+    /// The fastest one joint has moved.
+    pub const JOINT_SPEED_DPS: &str = "joint_speed_dps";
+    /// The longest powered between two charges.
+    pub const ON_ONE_CHARGE_S: &str = "on_one_charge_s";
+
+    // ── tallies, mediad ──
+    /// Pictures taken: `GET /frame` snapshots.
+    pub const PHOTOS: &str = "photos";
+    /// Video streamed to remote peers, and the sessions that watched it.
+    pub const VIDEO_S: &str = "video_s";
+    pub const REMOTE_VISITS: &str = "remote_visits";
+
+    // ── tofd ──
+    /// Surface the depth sensor's beams have swept: each valid zone's footprint at its distance,
+    /// summed over frames. A tally.
+    pub const LASER_M2: &str = "laser_m2";
+    /// Depth frames read. A tally.
+    pub const TOF_FRAMES: &str = "tof_frames";
+    /// The nearest thing ever seen, a low; and the farthest, a high.
+    pub const CLOSEST_MM: &str = "closest_mm";
+    pub const FARTHEST_MM: &str = "farthest_mm";
+}
+
+/// Parameters of `robot.vetbookTally`: another daemon's counts and records since its last report,
+/// to merge into the book the way [`Life::tallies`], [`Life::highs`] and [`Life::lows`] merge.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VetbookTallyParams {
+    pub tallies: BTreeMap<String, f64>,
+    pub highs: BTreeMap<String, f64>,
+    pub lows: BTreeMap<String, f64>,
+}
+
+impl VetbookTallyParams {
+    pub fn is_empty(&self) -> bool {
+        self.tallies.is_empty() && self.highs.is_empty() && self.lows.is_empty()
+    }
+}
+
+/// Merge the three maps of `d` into `life`: add, keep the highest, keep the lowest. Non-finite
+/// values are dropped, so one bad reading cannot make a record that nothing can ever beat.
+pub fn merge_maps(
+    tallies: &mut BTreeMap<String, f64>,
+    highs: &mut BTreeMap<String, f64>,
+    lows: &mut BTreeMap<String, f64>,
+    d: &VetbookTallyParams,
+) {
+    for (k, v) in d.tallies.iter().filter(|(_, v)| v.is_finite()) {
+        *tallies.entry(k.clone()).or_default() += v;
+    }
+    for (k, v) in d.highs.iter().filter(|(_, v)| v.is_finite()) {
+        let e = highs.entry(k.clone()).or_insert(*v);
+        *e = e.max(*v);
+    }
+    for (k, v) in d.lows.iter().filter(|(_, v)| v.is_finite()) {
+        let e = lows.entry(k.clone()).or_insert(*v);
+        *e = e.min(*v);
+    }
 }
 
 /// One joint's servo — the one in it now, and the ones it had before.
@@ -381,6 +484,24 @@ mod tests {
         let old = r#"{"motors":[{"id":20,"wear":{"trips":{"voltage":1,"overload":2}}}]}"#;
         let book: Vetbook = serde_json::from_str(old).unwrap();
         assert_eq!(book.motors[0].wear.trips.total(), 2);
+    }
+
+    #[test]
+    fn records_merge_by_kind() {
+        let (mut t, mut h, mut l) = Default::default();
+        let mut d = VetbookTallyParams::default();
+        d.tallies.insert(key::PHOTOS.into(), 2.0);
+        d.highs.insert(key::SPIN_DPS.into(), 300.0);
+        d.lows.insert(key::CLOSEST_MM.into(), 40.0);
+        merge_maps(&mut t, &mut h, &mut l, &d);
+        d.highs.insert(key::SPIN_DPS.into(), 120.0);
+        d.lows.insert(key::CLOSEST_MM.into(), 90.0);
+        d.tallies.insert("junk".into(), f64::NAN);
+        merge_maps(&mut t, &mut h, &mut l, &d);
+        assert_eq!(t[key::PHOTOS], 4.0);
+        assert_eq!(h[key::SPIN_DPS], 300.0);
+        assert_eq!(l[key::CLOSEST_MM], 40.0);
+        assert!(!t.contains_key("junk"));
     }
 
     #[test]

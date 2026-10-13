@@ -3819,6 +3819,10 @@ async fn control_loop<T: RobotIo>(
             odom: (odometry.position(), odometry.yaw()),
             fresh: fresh.as_ref(),
             overran: tick_start.elapsed() > period,
+            flashlight: state.flashlight.load(Ordering::Relaxed) != 0,
+            // What a client asked the beak to do, or the chorale singing through it.
+            mouth: snapshot.mouth.max(chorale_mouth),
+            sounds_played: voice.as_ref().map(|v| v.played()),
         });
 
         // Only assemble a frame when somebody is subscribed. On a robot nobody usually is,
@@ -3908,6 +3912,11 @@ async fn control_loop<T: RobotIo>(
                 temps.as_ref(),
                 volts,
                 f64::from_bits(state.cpu_temp_c.load(Ordering::Relaxed)),
+                state
+                    .cpu_throttle
+                    .load()
+                    .as_ref()
+                    .is_some_and(|t| t.khz < t.max_khz),
                 window.as_secs_f64(),
             );
             // The servos' latched alerts, for the vet book. A third small transaction, so not on
@@ -5262,6 +5271,7 @@ fn dispatch(
                 ),
                 Some(mode) => {
                     intents.request_mode_switch(mode_code(mode));
+                    state.vetbook.bump(proto::vetbook::key::GAIT_CHANGES, 1.0);
                     proto::IntentResult::accepted()
                 }
             };
@@ -5277,6 +5287,12 @@ fn dispatch(
 
         // The vet book, as of the loop's last handoff — at most a second behind.
         proto::Call::RobotVetbook => proto::Response::ok(Some(id), &state.vetbook.snapshot()),
+        // Another daemon's counts: photos, laser sweep. Accepted and merged, never refused — a
+        // name the cards do not know yet is kept until one does.
+        proto::Call::RobotVetbookTally(p) => {
+            state.vetbook.tally(p);
+            proto::Response::ok(Some(id), &proto::IntentResult::accepted())
+        }
         proto::Call::RobotVetbookNote(p) => {
             let result = match state.vetbook.note(&p.text) {
                 Ok(()) => proto::IntentResult::accepted(),
@@ -5325,7 +5341,11 @@ fn dispatch(
         }
 
         proto::Call::RobotLoadPolicy(p) => {
-            proto::Response::ok(Some(id), &load_policy_request(p, state, intents))
+            let result = load_policy_request(p, state, intents);
+            if result.accepted {
+                state.vetbook.bump(proto::vetbook::key::GAIT_CHANGES, 1.0);
+            }
+            proto::Response::ok(Some(id), &result)
         }
 
         // Re-read every slot, whatever the paths say.
