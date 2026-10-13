@@ -370,6 +370,16 @@ pub const REGISTRY: &[Entry] = &[
         "Furthest a glance tips up or down, radians",
     ),
     entry(
+        "idle.glance_neck",
+        Kind::Float,
+        "Furthest a glance leans the neck forward or back, radians",
+    ),
+    entry(
+        "idle.glance_mouth",
+        Kind::Float,
+        "How far a look opens the beak at most, 0..1",
+    ),
+    entry(
         "idle.tilt_roll",
         Kind::Float,
         "The curious sideways tilt, radians",

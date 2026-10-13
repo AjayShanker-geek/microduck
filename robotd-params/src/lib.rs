@@ -877,6 +877,12 @@ pub struct IdleParams {
     pub glance_yaw: f64,
     /// How far a glance tips it up or down at most.
     pub glance_pitch: f64,
+    /// How far a glance leans the neck forward or back at most — posture under the look, so
+    /// the whole head shifts rather than only the face turning.
+    pub glance_neck: f64,
+    /// How far a look opens the beak at most, 0..1 — eased with the glance, so the mouth moves
+    /// a little as the robot looks about. Zero keeps it shut but for the yawns.
+    pub glance_mouth: f64,
     /// The curious sideways tilt a glance sometimes comes with.
     pub tilt_roll: f64,
     /// How often a glance comes with the tilt, 0..1.
@@ -928,6 +934,8 @@ impl Default for IdleParams {
             fade_s: 1.5,
             glance_yaw: 0.6,
             glance_pitch: 0.2,
+            glance_neck: 0.15,
+            glance_mouth: 0.15,
             tilt_roll: 0.3,
             tilt_chance: 0.25,
             centre_chance: 0.25,
@@ -963,6 +971,8 @@ impl IdleParams {
             ("fade_s", self.fade_s),
             ("glance_yaw", self.glance_yaw),
             ("glance_pitch", self.glance_pitch),
+            ("glance_neck", self.glance_neck),
+            ("glance_mouth", self.glance_mouth),
             ("tilt_roll", self.tilt_roll),
             ("tilt_chance", self.tilt_chance),
             ("centre_chance", self.centre_chance),
@@ -1013,6 +1023,9 @@ impl IdleParams {
         }
         if self.doze_floor > 1.0 {
             return Some(("doze_floor", "must be at most 1 — 1 never dozes"));
+        }
+        if self.glance_mouth > 1.0 {
+            return Some(("glance_mouth", "is a mouth opening, 0 to 1"));
         }
         if self.yawn_open > 1.0 {
             return Some(("yawn_open", "is a mouth opening, 0 to 1"));

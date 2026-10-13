@@ -463,11 +463,15 @@ mode = "walk"
 # after_s = 2.0
 # fade_s = 1.5
 
-# Where a glance goes: up to glance_yaw left or right and glance_pitch up or down, sometimes
+# Where a glance goes: up to glance_yaw left or right and glance_pitch up or down, with the neck
+# leaning up to glance_neck forward or back under it and the beak opening up to glance_mouth
+# (0..1), sometimes
 # (tilt_chance) with the curious sideways tilt, sometimes (centre_chance) back to the middle, and
 # always at least glance_min away from the last look.
 # glance_yaw = 0.6
 # glance_pitch = 0.2
+# glance_neck = 0.15
+# glance_mouth = 0.15
 # tilt_roll = 0.3
 # tilt_chance = 0.25
 # centre_chance = 0.25

@@ -9,6 +9,8 @@
 //!   on an ease-in-ease-out curve, and holds the look;
 //! - **keeps looking** while it holds: the gaze shifts a few degrees around the spot every half
 //!   second or so, the way eyes re-fixate on something they are looking at;
+//! - **leans its neck** a little forward or back with each new look, so the whole head shifts
+//!   rather than only the face turning, and the beak opens a touch or closes with it;
 //! - **tilts its head** now and then on a glance, the curious sideways tilt;
 //! - **never quite freezes**: a slow, smooth drift of a degree or two rides on every axis, and
 //!   the body breathes — a millimetre of height on a few-second cycle;
@@ -41,11 +43,11 @@ pub struct IdleOffset {
 }
 
 /// One move and the pause after it: from where, to where, when it started, how long the move
-/// takes, until when it is held. Yaw, pitch, roll.
+/// takes, until when it is held. Yaw, pitch, roll, neck, and the beak's opening.
 #[derive(Debug, Clone, Copy)]
 struct Glance {
-    from: [f64; 3],
-    to: [f64; 3],
+    from: [f64; 5],
+    to: [f64; 5],
     start: f64,
     travel: f64,
     until: f64,
@@ -54,7 +56,7 @@ struct Glance {
 /// Where it has chosen to look, and until when — the gaze shifts around `anchor` until then.
 #[derive(Debug, Clone, Copy)]
 struct Look {
-    anchor: [f64; 3],
+    anchor: [f64; 5],
     until: f64,
 }
 
@@ -166,12 +168,12 @@ impl IdleHead {
         // Moves only while idle, and not mid-yawn: fading out, the current one is simply let go
         // of; yawning, it is held.
         if idle && self.yawn.is_none() && self.glance.is_none_or(|g| t >= g.until) {
-            let from = self.glance.map_or([0.0; 3], |g| g.to);
+            let from = self.glance.map_or([0.0; 5], |g| g.to);
             self.glance = Some(self.next_glance(from, t, energy));
         }
-        let [yaw, pitch, roll] = self.glance.map_or([0.0; 3], |g| {
+        let [yaw, pitch, roll, neck, beak] = self.glance.map_or([0.0; 5], |g| {
             let s = ease((t - g.start) / g.travel);
-            [0, 1, 2].map(|i| g.from[i] + (g.to[i] - g.from[i]) * s)
+            [0, 1, 2, 3, 4].map(|i| g.from[i] + (g.to[i] - g.from[i]) * s)
         });
 
         // The drift: two incommensurate slow waves per axis, so it never visibly repeats.
@@ -185,19 +187,19 @@ impl IdleHead {
         let g = self.gain;
         IdleOffset {
             head: [
-                0.0,
+                g * neck,
                 g * (pitch + p.yawn_pitch * yawn + drift(self.phases[0], p.drift_hz * 1.2)),
                 g * (yaw + drift(self.phases[1], p.drift_hz * 0.8)),
                 g * (roll + drift(self.phases[2], p.drift_hz)),
             ],
             body_z: g * breath,
-            mouth: g * p.yawn_open * yawn,
+            mouth: g * (beak + p.yawn_open * yawn).min(1.0),
         }
     }
 
     /// The next move, from `from`, at spell time `t`: a small shift around the look being held,
     /// or, once that look is over, a glance somewhere new.
-    fn next_glance(&mut self, from: [f64; 3], t: f64, energy: f64) -> Glance {
+    fn next_glance(&mut self, from: [f64; 5], t: f64, energy: f64) -> Glance {
         let p = self.tuning;
         let holding = self.look.filter(|look| t < look.until);
         let to = match holding {
@@ -205,10 +207,13 @@ impl IdleHead {
                 look.anchor[0] + p.nudge_yaw * energy * self.rng.between(-1.0, 1.0),
                 look.anchor[1] + p.nudge_pitch * energy * self.rng.between(-1.0, 1.0),
                 look.anchor[2],
+                look.anchor[3],
+                look.anchor[4],
             ],
             None => self.somewhere_new(energy),
         };
-        let distance = (0..3)
+        // Angles only: the beak is an opening, not radians travelled.
+        let distance = (0..4)
             .map(|i| (to[i] - from[i]).powi(2))
             .sum::<f64>()
             .sqrt();
@@ -236,9 +241,9 @@ impl IdleHead {
 
     /// A new place to look, at least `glance_min` from the last one. Drawn again when it lands
     /// too close; after a few misses the furthest draw is taken rather than looping.
-    fn somewhere_new(&mut self, energy: f64) -> [f64; 3] {
-        let last = self.look.map_or([0.0; 3], |look| look.anchor);
-        let away = |to: [f64; 3]| (to[0] - last[0]).hypot(to[1] - last[1]);
+    fn somewhere_new(&mut self, energy: f64) -> [f64; 5] {
+        let last = self.look.map_or([0.0; 5], |look| look.anchor);
+        let away = |to: [f64; 5]| (to[0] - last[0]).hypot(to[1] - last[1]);
         let mut best = self.draw(energy);
         for _ in 0..8 {
             if away(best) >= self.tuning.glance_min {
@@ -253,10 +258,10 @@ impl IdleHead {
     }
 
     /// Anywhere to look: the middle, or somewhere within reach.
-    fn draw(&mut self, energy: f64) -> [f64; 3] {
+    fn draw(&mut self, energy: f64) -> [f64; 5] {
         let p = self.tuning;
         if self.rng.unit() < p.centre_chance {
-            return [0.0; 3];
+            return [0.0; 5];
         }
         let reach = 0.5 + 0.5 * energy;
         let tilt = if self.rng.unit() < p.tilt_chance {
@@ -268,6 +273,8 @@ impl IdleHead {
             p.glance_yaw * reach * self.rng.between(-1.0, 1.0),
             p.glance_pitch * reach * self.rng.between(-1.0, 1.0),
             tilt,
+            p.glance_neck * reach * self.rng.between(-1.0, 1.0),
+            p.glance_mouth * reach * self.rng.unit(),
         ]
     }
 }
@@ -345,7 +352,7 @@ mod tests {
     }
 
     /// Nothing before the idle delay; after it, it looks around within its bounds, in yaw and
-    /// pitch and sometimes roll, and the neck is left alone.
+    /// pitch and sometimes roll, with the neck leaning under it.
     #[test]
     fn it_looks_around_only_after_the_robot_has_been_still() {
         let p = IdleParams::default();
@@ -356,7 +363,10 @@ mod tests {
 
         let (_, later) = run(&mut idle, now, 60.0, true);
         let peak = |i: usize| later.iter().map(|o| o.head[i].abs()).fold(0.0, f64::max);
-        assert_eq!(peak(0), 0.0, "the neck is left alone");
+        assert!(peak(0) > 0.05, "the neck leans too: {}", peak(0));
+        assert!(peak(0) <= p.glance_neck + 1e-9);
+        let beak = later.iter().map(|o| o.mouth).fold(0.0, f64::max);
+        assert!(beak > 0.02, "the beak moves: {beak}");
         assert!(peak(2) > 0.2, "it really glances sideways: {}", peak(2));
         assert!(peak(2) <= p.glance_yaw + p.nudge_yaw + p.drift + 1e-9);
         assert!(peak(1) <= p.glance_pitch + p.nudge_pitch + p.drift + 1e-9);
@@ -464,7 +474,7 @@ mod tests {
         let p = IdleParams::default();
         let mut idle = IdleHead::new(p, 13);
         let mut now = Instant::now();
-        let mut anchors: Vec<[f64; 3]> = Vec::new();
+        let mut anchors: Vec<[f64; 5]> = Vec::new();
         for _ in 0..(300.0 / DT.as_secs_f64()) as usize {
             now += DT;
             idle.tick(now, true, DT);
@@ -485,7 +495,11 @@ mod tests {
     /// the head, and closes it again.
     #[test]
     fn it_yawns_once_it_has_been_idle_a_while() {
-        let p = IdleParams::default();
+        // The glances' own beak movement off, so the mouth is the yawn's alone.
+        let p = IdleParams {
+            glance_mouth: 0.0,
+            ..IdleParams::default()
+        };
         let mut idle = IdleHead::new(p, 17);
         let t0 = Instant::now();
         let (now, early) = run(&mut idle, t0, p.after_s + p.yawn_after_s - 1.0, true);
