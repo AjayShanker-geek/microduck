@@ -194,6 +194,7 @@ async fn main() -> std::process::ExitCode {
 
     let status = Arc::new(Status::new(args.hz));
     let (frames, _) = tokio::sync::broadcast::channel(FRAME_BUFFER);
+    tokio::spawn(vetbook_tally(frames.subscribe()));
 
     // `robotd`'s file, read once: the board decides which bus the sensor is on, and
     // `[head_imu]` whether the IMU is read.
@@ -1039,5 +1040,119 @@ mod tests {
     #[test]
     fn a_zero_rate_is_treated_as_one_hertz() {
         assert_eq!(quiet_period(0), Duration::from_secs(1) - POLL_GUARD);
+    }
+}
+
+/// How often the vet book hears from this daemon.
+const VETBOOK_EVERY: Duration = Duration::from_secs(60);
+
+/// One zone's side, radians: the sensor's 45° field split eight ways.
+const ZONE_RAD: f64 = (45.0 / 8.0) * std::f64::consts::PI / 180.0;
+
+/// The vet book's depth records, from the frames this daemon already publishes.
+///
+/// A listener on the same broadcast every client reads, so the sensor's loop is untouched and the
+/// cost is one small copy per frame and a few dozen multiply-adds. Nothing here asks for frames: a
+/// duck whose sensor is not streaming reports nothing.
+///
+/// The swept area is each valid zone's footprint at its distance (distance² × the zone's solid
+/// angle), summed over frames — how much the laser has looked at, not how much ground the duck has
+/// covered: a duck staring at one wall sweeps it again every frame. Unique area would need a map.
+async fn vetbook_tally(mut frames: tokio::sync::broadcast::Receiver<proto::TofFrame>) {
+    use proto::vetbook::{VetbookTallyParams, merge_maps};
+    let socket = PathBuf::from(proto::socket::ROBOT);
+    let mut pending = VetbookTallyParams::default();
+    let mut reported = Instant::now();
+    loop {
+        match frames.recv().await {
+            Ok(frame) => tally_frame(frame, &mut pending),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+        if reported.elapsed() < VETBOOK_EVERY || pending.is_empty() {
+            continue;
+        }
+        reported = Instant::now();
+        let batch = std::mem::take(&mut pending);
+        let socket = socket.clone();
+        let sent = tokio::task::spawn_blocking(move || {
+            proto::vetbook::report(&socket, &batch, Duration::from_secs(2)).map_err(|e| (e, batch))
+        })
+        .await;
+        // `robotd` restarting, or not up yet: keep the counts for the next report.
+        if let Ok(Err((e, batch))) = sent {
+            tracing::debug!(error = %e, "vet book: report not delivered; keeping it");
+            let (t, h, l) = (&mut pending.tallies, &mut pending.highs, &mut pending.lows);
+            merge_maps(t, h, l, &batch);
+        }
+    }
+}
+
+fn tally_frame(frame: proto::TofFrame, pending: &mut proto::vetbook::VetbookTallyParams) {
+    use proto::vetbook::key;
+    let frame = tof::Frame {
+        rows: frame.rows,
+        cols: frame.cols,
+        distance_mm: frame.distance_mm,
+        status: frame.status,
+    };
+    let (mut area, mut closest, mut farthest) = (0.0f64, f64::INFINITY, 0.0f64);
+    for zone in frame.zones() {
+        if let tof::Zone::Range(metres) = zone {
+            let d = f64::from(metres);
+            area += d * d * ZONE_RAD * ZONE_RAD;
+            // Whole millimetres, the sensor's own resolution; the f32 metres in between add noise.
+            let mm = (d * 1000.0).round();
+            closest = closest.min(mm);
+            farthest = farthest.max(mm);
+        }
+    }
+    *pending
+        .tallies
+        .entry(key::TOF_FRAMES.to_owned())
+        .or_default() += 1.0;
+    if area > 0.0 {
+        *pending.tallies.entry(key::LASER_M2.to_owned()).or_default() += area;
+        let low = pending
+            .lows
+            .entry(key::CLOSEST_MM.to_owned())
+            .or_insert(closest);
+        *low = low.min(closest);
+        let high = pending
+            .highs
+            .entry(key::FARTHEST_MM.to_owned())
+            .or_insert(farthest);
+        *high = high.max(farthest);
+    }
+}
+
+#[cfg(test)]
+mod vetbook_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_adds_its_sweep_and_its_extremes() {
+        let mut pending = proto::vetbook::VetbookTallyParams::default();
+        let mut distance_mm = vec![1000i16; tof::ZONES];
+        distance_mm[0] = 120;
+        let mut status = vec![5u8; tof::ZONES];
+        status[1] = 255; // not a range
+        tally_frame(
+            proto::TofFrame {
+                rows: 8,
+                cols: 8,
+                distance_mm,
+                status,
+                ..Default::default()
+            },
+            &mut pending,
+        );
+        use proto::vetbook::key;
+        assert_eq!(pending.tallies[key::TOF_FRAMES], 1.0);
+        assert_eq!(pending.lows[key::CLOSEST_MM], 120.0);
+        assert_eq!(pending.highs[key::FARTHEST_MM], 1000.0);
+        // 62 zones at 1 m and one at 12 cm, each (45°/8)² sr.
+        let expected = (62.0 + 0.12 * 0.12) * ZONE_RAD * ZONE_RAD;
+        assert!((pending.tallies[key::LASER_M2] - expected).abs() < 1e-9);
     }
 }

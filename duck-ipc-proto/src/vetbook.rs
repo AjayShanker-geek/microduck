@@ -193,6 +193,35 @@ impl VetbookTallyParams {
     }
 }
 
+/// Send `p` to `robotd` as `robot.vetbookTally`, and wait for its answer — at most `timeout` on
+/// each of connect, write and read. Blocking and std-only, for a daemon's reporting thread or a
+/// `spawn_blocking`; a daemon whose report fails keeps the counts and sends them with the next.
+pub fn report(
+    socket: &std::path::Path,
+    p: &VetbookTallyParams,
+    timeout: std::time::Duration,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, Write};
+    let stream = std::os::unix::net::UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = crate::Request::call(
+        crate::Id::Number(1),
+        &crate::Call::RobotVetbookTally(p.clone()),
+    );
+    let mut line = serde_json::to_vec(&request).map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    (&stream).write_all(&line)?;
+    let mut reply = String::new();
+    std::io::BufReader::new(&stream).read_line(&mut reply)?;
+    let response: crate::Response =
+        serde_json::from_str(reply.trim()).map_err(std::io::Error::other)?;
+    match response.error {
+        None => Ok(()),
+        Some(e) => Err(std::io::Error::other(e.message)),
+    }
+}
+
 /// Merge the three maps of `d` into `life`: add, keep the highest, keep the lowest. Non-finite
 /// values are dropped, so one bad reading cannot make a record that nothing can ever beat.
 pub fn merge_maps(
