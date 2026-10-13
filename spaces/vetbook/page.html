@@ -66,9 +66,9 @@ code { font-size: .95em; background: var(--card); padding: 1px 6px; border-radiu
   </header>
   <img class="card" src="{{ image }}" alt="{{ title }}: hours awake, distance walked, cuddles, falls and its favourite trick" width="1200" height="630">
   <div class="share">
-    <a class="btn" href="https://x.com/intent/post?text={{ post_text|urlencode }}&url={{ url|urlencode }}" target="_blank" rel="noopener">Post on X</a>
-    <a class="btn" style="--c:var(--sky);--d:var(--sky-d)" href="https://bsky.app/intent/compose?text={{ (post_text ~ ' ' ~ url)|urlencode }}" target="_blank" rel="noopener">Post on Bluesky</a>
-    <a class="btn" style="--c:var(--lav);--d:var(--lav-d)" href="https://www.linkedin.com/sharing/share-offsite/?url={{ url|urlencode }}" target="_blank" rel="noopener">Share on LinkedIn</a>
+    <a class="btn post" href="https://x.com/intent/post?text={{ post_text|urlencode }}&url={{ url|urlencode }}" target="_blank" rel="noopener">Post on X</a>
+    <a class="btn post" style="--c:var(--sky);--d:var(--sky-d)" href="https://bsky.app/intent/compose?text={{ (post_text ~ ' ' ~ url)|urlencode }}" target="_blank" rel="noopener">Post on Bluesky</a>
+    <a class="btn post" style="--c:var(--lav);--d:var(--lav-d)" href="https://www.linkedin.com/sharing/share-offsite/?url={{ url|urlencode }}" target="_blank" rel="noopener">Share on LinkedIn</a>
     <button class="btn" style="--c:var(--mint);--d:var(--mint-d)" id="copy" type="button">Copy link</button>
     <a class="btn" style="--c:#ffa94d;--d:#e5862a" href="{{ image }}" download="{{ robot }}-vetbook.png">Download card</a>
     <button class="btn" style="--c:var(--pink);--d:var(--pink-d)" id="native" type="button" hidden>Share…</button>
@@ -87,6 +87,20 @@ code { font-size: .95em; background: var(--card); padding: 1px 6px; border-radiu
 <script>
   const url = {{ url|tojson }};
   const hint = document.getElementById("hint");
+
+  // A post link can carry text and a URL, never an image. So the card goes on the clipboard as the
+  // composer opens, to paste in. The blob is handed over as a promise, inside the click, because
+  // that is what keeps the browser's permission to write the clipboard while the image downloads.
+  const card = () => fetch({{ image|tojson }}).then(r => r.blob()).then(b => new Blob([b], { type: "image/png" }));
+  for (const a of document.querySelectorAll(".post")) {
+    a.addEventListener("click", () => {
+      if (!window.ClipboardItem || !navigator.clipboard?.write) return;
+      navigator.clipboard
+        .write([new ClipboardItem({ "image/png": card() })])
+        .then(() => { hint.textContent = "The card is on your clipboard: paste it into the post (Ctrl+V or ⌘V) ♡"; })
+        .catch(() => { hint.textContent = "Use Download card to attach the picture to your post."; });
+    });
+  }
   document.getElementById("copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(url); hint.textContent = "Link copied ♡"; }
     catch { hint.textContent = url; }
