@@ -77,6 +77,7 @@ futures = "0.3"
 # developer sits at, and the interesting part of `open` is finding the robot, not spawning a process.
 webbrowser = "1.2.4"
 serde_json.workspace = true
+socket2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 # libdbus compiled in rather than linked, so the Linux binary needs nothing from the machine but
