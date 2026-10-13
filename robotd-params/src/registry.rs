@@ -385,6 +385,11 @@ pub const REGISTRY: &[Entry] = &[
         "How often a glance goes back to the middle, 0..1",
     ),
     entry(
+        "idle.glance_min",
+        Kind::Float,
+        "Least a new look moves from the last, radians",
+    ),
+    entry(
         "idle.hold_min_s",
         Kind::Float,
         "Shortest look before picking somewhere new, seconds",
@@ -449,6 +454,27 @@ pub const REGISTRY: &[Entry] = &[
         "idle.doze_floor",
         Kind::Float,
         "How calm it gets, 0..1 — 1 never dozes",
+    ),
+    entry(
+        "idle.yawn_after_s",
+        Kind::Float,
+        "Seconds idle before it may yawn",
+    ),
+    entry(
+        "idle.yawn_every_s",
+        Kind::Float,
+        "About how often it yawns after that, seconds; 0 = never",
+    ),
+    entry("idle.yawn_s", Kind::Float, "How long a yawn lasts, seconds"),
+    entry(
+        "idle.yawn_open",
+        Kind::Float,
+        "How far a yawn opens the mouth, 0..1",
+    ),
+    entry(
+        "idle.yawn_pitch",
+        Kind::Float,
+        "How far a yawn tips the head, radians; negative is up",
     ),
     // ── [pickup] ─────────────────────────────────────────────────────────────
     feature(

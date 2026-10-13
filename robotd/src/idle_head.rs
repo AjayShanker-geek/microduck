@@ -5,15 +5,16 @@
 //! nobody steering the head, it
 //!
 //! - **glances**: every second or few it picks somewhere to look — mostly left or right, a little
-//!   up or down, sometimes back to the middle — moves there on an ease-in-ease-out curve, and
-//!   holds the look;
+//!   up or down, sometimes back to the middle, never right where it already was — moves there
+//!   on an ease-in-ease-out curve, and holds the look;
 //! - **keeps looking** while it holds: the gaze shifts a few degrees around the spot every half
 //!   second or so, the way eyes re-fixate on something they are looking at;
 //! - **tilts its head** now and then on a glance, the curious sideways tilt;
 //! - **never quite freezes**: a slow, smooth drift of a degree or two rides on every axis, and
 //!   the body breathes — a millimetre of height on a few-second cycle;
 //! - **calms down**: right after it stops it is lively, and the longer nothing happens the slower
-//!   and smaller its glances get, as if dozing off. Any motion wakes it.
+//!   and smaller its glances get, as if dozing off, and now and then it **yawns** — the beak
+//!   opens slowly and the head tips back. Silent. Any motion wakes it.
 //!
 //! All of it is added on top of whatever the head and body were last asked to do, the way the
 //! chorale's sway is, and fades in and out over `fade_s`, so it never jumps. Every number is
@@ -35,6 +36,8 @@ pub struct IdleOffset {
     /// Body height, metres. Only meaningful to a network trained on the body pose; the caller
     /// decides whether to apply it.
     pub body_z: f64,
+    /// Mouth opening, 0..1 — the yawn. The caller decides who else has the mouth.
+    pub mouth: f64,
 }
 
 /// One move and the pause after it: from where, to where, when it started, how long the move
@@ -70,6 +73,8 @@ pub struct IdleHead {
     look: Option<Look>,
     /// The move in progress, in seconds on the spell's clock.
     glance: Option<Glance>,
+    /// When the yawn in progress started, on the spell's clock.
+    yawn: Option<f64>,
     /// Random phases for the drift and the breath, so two robots side by side do not move in step.
     phases: [f64; 4],
 }
@@ -87,6 +92,7 @@ impl IdleHead {
             started: None,
             look: None,
             glance: None,
+            yawn: None,
             phases,
         }
     }
@@ -133,14 +139,33 @@ impl IdleHead {
             self.started = None;
             self.look = None;
             self.glance = None;
+            self.yawn = None;
             return IdleOffset::default();
         }
 
         let t = now.duration_since(started).as_secs_f64();
         let energy = p.doze_floor + (1.0 - p.doze_floor) * (-t / p.doze_tau_s).exp();
 
-        // Moves only while idle: fading out, the current one is simply let go of.
-        if idle && self.glance.is_none_or(|g| t >= g.until) {
+        // A yawn now and then, once it has been idle a while: a coin per tick, so they come
+        // about `yawn_every_s` apart without a rhythm to them.
+        if self.yawn.is_some_and(|start| t - start >= p.yawn_s) {
+            self.yawn = None;
+        }
+        if idle
+            && self.yawn.is_none()
+            && p.yawn_every_s > 0.0
+            && t >= p.yawn_after_s
+            && self.rng.unit() < dt.as_secs_f64() / p.yawn_every_s
+        {
+            self.yawn = Some(t);
+        }
+        let yawn = self
+            .yawn
+            .map_or(0.0, |start| yawn_shape((t - start) / p.yawn_s));
+
+        // Moves only while idle, and not mid-yawn: fading out, the current one is simply let go
+        // of; yawning, it is held.
+        if idle && self.yawn.is_none() && self.glance.is_none_or(|g| t >= g.until) {
             let from = self.glance.map_or([0.0; 3], |g| g.to);
             self.glance = Some(self.next_glance(from, t, energy));
         }
@@ -161,11 +186,12 @@ impl IdleHead {
         IdleOffset {
             head: [
                 0.0,
-                g * (pitch + drift(self.phases[0], p.drift_hz * 1.2)),
+                g * (pitch + p.yawn_pitch * yawn + drift(self.phases[0], p.drift_hz * 1.2)),
                 g * (yaw + drift(self.phases[1], p.drift_hz * 0.8)),
                 g * (roll + drift(self.phases[2], p.drift_hz)),
             ],
             body_z: g * breath,
+            mouth: g * p.yawn_open * yawn,
         }
     }
 
@@ -208,8 +234,26 @@ impl IdleHead {
         }
     }
 
-    /// A new place to look.
+    /// A new place to look, at least `glance_min` from the last one. Drawn again when it lands
+    /// too close; after a few misses the furthest draw is taken rather than looping.
     fn somewhere_new(&mut self, energy: f64) -> [f64; 3] {
+        let last = self.look.map_or([0.0; 3], |look| look.anchor);
+        let away = |to: [f64; 3]| (to[0] - last[0]).hypot(to[1] - last[1]);
+        let mut best = self.draw(energy);
+        for _ in 0..8 {
+            if away(best) >= self.tuning.glance_min {
+                break;
+            }
+            let next = self.draw(energy);
+            if away(next) > away(best) {
+                best = next;
+            }
+        }
+        best
+    }
+
+    /// Anywhere to look: the middle, or somewhere within reach.
+    fn draw(&mut self, energy: f64) -> [f64; 3] {
         let p = self.tuning;
         if self.rng.unit() < p.centre_chance {
             return [0.0; 3];
@@ -233,6 +277,15 @@ impl IdleHead {
 fn ease(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
     x * x * x * (10.0 + x * (-15.0 + 6.0 * x))
+}
+
+/// A yawn's beak opening over its length, 0..1: slow open, a hold at the top, a quicker close.
+fn yawn_shape(x: f64) -> f64 {
+    match x {
+        x if x < 0.4 => ease(x / 0.4),
+        x if x < 0.7 => 1.0,
+        x => 1.0 - ease((x - 0.7) / 0.3),
+    }
 }
 
 /// A small xorshift generator: the glances want variety, not cryptography, and a dependency for
@@ -325,6 +378,8 @@ mod tests {
                 let step = (pair[1].head[i] - pair[0].head[i]).abs();
                 assert!(step < 0.03, "a {step} rad step on axis {i}");
             }
+            let step = (pair[1].mouth - pair[0].mouth).abs();
+            assert!(step < 0.05, "a {step} mouth step");
         }
     }
 
@@ -403,6 +458,55 @@ mod tests {
         assert!(moves >= 2 * looks, "{moves} moves over {looks} looks");
     }
 
+    /// A new look is never right where the last one was.
+    #[test]
+    fn a_new_look_goes_somewhere() {
+        let p = IdleParams::default();
+        let mut idle = IdleHead::new(p, 13);
+        let mut now = Instant::now();
+        let mut anchors: Vec<[f64; 3]> = Vec::new();
+        for _ in 0..(300.0 / DT.as_secs_f64()) as usize {
+            now += DT;
+            idle.tick(now, true, DT);
+            if let Some(look) = idle.look
+                && anchors.last() != Some(&look.anchor)
+            {
+                anchors.push(look.anchor);
+            }
+        }
+        assert!(anchors.len() > 20, "{} looks", anchors.len());
+        for pair in anchors.windows(2) {
+            let away = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+            assert!(away >= p.glance_min, "a look {away} rad from the last");
+        }
+    }
+
+    /// No yawn early on; once it has been idle a while it yawns, opening the mouth and tipping
+    /// the head, and closes it again.
+    #[test]
+    fn it_yawns_once_it_has_been_idle_a_while() {
+        let p = IdleParams::default();
+        let mut idle = IdleHead::new(p, 17);
+        let t0 = Instant::now();
+        let (now, early) = run(&mut idle, t0, p.after_s + p.yawn_after_s - 1.0, true);
+        assert!(early.iter().all(|o| o.mouth == 0.0), "not yet");
+        let (_, later) = run(&mut idle, now, 10.0 * p.yawn_every_s, true);
+        let peak = later.iter().map(|o| o.mouth).fold(0.0, f64::max);
+        assert!(peak > 0.9 * p.yawn_open && peak <= p.yawn_open, "{peak}");
+        assert!(
+            later.iter().any(|o| o.mouth == 0.0 && o.head != [0.0; 4]),
+            "it closes"
+        );
+
+        let never = IdleParams {
+            yawn_every_s: 0.0,
+            ..p
+        };
+        let mut idle = IdleHead::new(never, 17);
+        let (_, all) = run(&mut idle, t0, 600.0, true);
+        assert!(all.iter().all(|o| o.mouth == 0.0), "0 is never");
+    }
+
     /// Off is off, however still the robot is.
     #[test]
     fn disabled_it_does_nothing() {
@@ -413,6 +517,13 @@ mod tests {
         let mut idle = IdleHead::new(p, 9);
         let (_, all) = run(&mut idle, Instant::now(), 30.0, true);
         assert!(all.iter().all(|o| *o == IdleOffset::default()));
+    }
+
+    #[test]
+    fn a_yawn_starts_and_ends_closed() {
+        assert_eq!(yawn_shape(0.0), 0.0);
+        assert_eq!(yawn_shape(0.5), 1.0);
+        assert_eq!(yawn_shape(1.0), 0.0);
     }
 
     #[test]

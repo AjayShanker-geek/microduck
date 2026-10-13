@@ -860,7 +860,8 @@ pub struct ChoraleParams {
 /// holds the look while shifting its gaze a little around it, and picks somewhere new; a slow
 /// drift and a breath ride on top, and the longer it is left alone the calmer it gets. Every
 /// number here is a tuning knob for how alive that reads, nothing more: none of them can move
-/// the head further than `glance_yaw` + `nudge_yaw` + `drift` from where it was asked to be.
+/// the head further than `glance_yaw` + `nudge_yaw` + `drift` from where it was asked to be, or
+/// pitch it further than `yawn_pitch` beyond that.
 ///
 /// Angles are radians, durations seconds. Read once at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -882,6 +883,9 @@ pub struct IdleParams {
     pub tilt_chance: f64,
     /// How often a glance goes back to the middle rather than somewhere new, 0..1.
     pub centre_chance: f64,
+    /// How far a new look is from the last one at least, yaw and pitch together — so a glance
+    /// never lands where the head already is and reads as dithering.
+    pub glance_min: f64,
     /// How long one look lasts before it picks somewhere new, at full energy; dozing stretches
     /// it.
     pub hold_min_s: f64,
@@ -906,6 +910,14 @@ pub struct IdleParams {
     /// dozes.
     pub doze_tau_s: f64,
     pub doze_floor: f64,
+    /// Yawning, once it has been idle `yawn_after_s`: about every `yawn_every_s` (0 never), for
+    /// `yawn_s`, the mouth opens to `yawn_open` (0..1) and the head tips by `yawn_pitch`.
+    /// `yawn_pitch` is signed; negative is up, as far as `robot.look` says.
+    pub yawn_after_s: f64,
+    pub yawn_every_s: f64,
+    pub yawn_s: f64,
+    pub yawn_open: f64,
+    pub yawn_pitch: f64,
 }
 
 impl Default for IdleParams {
@@ -919,6 +931,7 @@ impl Default for IdleParams {
             tilt_roll: 0.3,
             tilt_chance: 0.25,
             centre_chance: 0.25,
+            glance_min: 0.2,
             hold_min_s: 1.0,
             hold_max_s: 3.0,
             move_min_s: 0.3,
@@ -933,6 +946,11 @@ impl Default for IdleParams {
             breath_period_s: 3.6,
             doze_tau_s: 90.0,
             doze_floor: 0.5,
+            yawn_after_s: 45.0,
+            yawn_every_s: 90.0,
+            yawn_s: 3.0,
+            yawn_open: 0.6,
+            yawn_pitch: -0.15,
         }
     }
 }
@@ -948,6 +966,7 @@ impl IdleParams {
             ("tilt_roll", self.tilt_roll),
             ("tilt_chance", self.tilt_chance),
             ("centre_chance", self.centre_chance),
+            ("glance_min", self.glance_min),
             ("hold_min_s", self.hold_min_s),
             ("hold_max_s", self.hold_max_s),
             ("move_min_s", self.move_min_s),
@@ -962,9 +981,16 @@ impl IdleParams {
             ("breath_period_s", self.breath_period_s),
             ("doze_tau_s", self.doze_tau_s),
             ("doze_floor", self.doze_floor),
+            ("yawn_after_s", self.yawn_after_s),
+            ("yawn_every_s", self.yawn_every_s),
+            ("yawn_s", self.yawn_s),
+            ("yawn_open", self.yawn_open),
         ];
         if let Some((key, _)) = finite.iter().find(|(_, v)| !(v.is_finite() && *v >= 0.0)) {
             return Some((key, "must be finite and nonnegative"));
+        }
+        if !self.yawn_pitch.is_finite() {
+            return Some(("yawn_pitch", "must be finite"));
         }
         // Each of these is divided by, or is what keeps a tick's motion from being a jump.
         for (key, value) in [
@@ -973,6 +999,7 @@ impl IdleParams {
             ("breath_period_s", self.breath_period_s),
             ("doze_tau_s", self.doze_tau_s),
             ("doze_floor", self.doze_floor),
+            ("yawn_s", self.yawn_s),
         ] {
             if value == 0.0 {
                 return Some((key, "must be above zero"));
@@ -986,6 +1013,9 @@ impl IdleParams {
         }
         if self.doze_floor > 1.0 {
             return Some(("doze_floor", "must be at most 1 — 1 never dozes"));
+        }
+        if self.yawn_open > 1.0 {
+            return Some(("yawn_open", "is a mouth opening, 0 to 1"));
         }
         if self.hold_min_s > self.hold_max_s {
             return Some(("hold_min_s", "must not be above idle.hold_max_s"));

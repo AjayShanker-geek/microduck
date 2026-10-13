@@ -3788,12 +3788,14 @@ async fn control_loop<T: RobotIo>(
             }
         }
 
-        // The mouth is not part of any policy; the intent is the only thing that moves it.
+        // The mouth is not part of any policy; the intent, and the idle yawn, are what move it.
         // Only while driving — a held or homing robot keeps whatever its hold pose says, so
         // a restart cannot snap a mouth.
+        // An idle yawn opens it further than a client asked, never less: the yawn only runs
+        // while nothing asks the robot to move, and a client holding the beak open keeps it so.
         if driving && theremin_state.is_none() && chorale_state.is_none() {
             targets[duck_control::model::MOUTH_INDEX] =
-                duck_control::model::mouth_target(snapshot.mouth);
+                duck_control::model::mouth_target(snapshot.mouth.max(idle.mouth));
         }
 
         // The next feature row pairs its reading with this command.

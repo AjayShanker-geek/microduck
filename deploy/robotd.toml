@@ -464,12 +464,14 @@ mode = "walk"
 # fade_s = 1.5
 
 # Where a glance goes: up to glance_yaw left or right and glance_pitch up or down, sometimes
-# (tilt_chance) with the curious sideways tilt, sometimes (centre_chance) back to the middle.
+# (tilt_chance) with the curious sideways tilt, sometimes (centre_chance) back to the middle, and
+# always at least glance_min away from the last look.
 # glance_yaw = 0.6
 # glance_pitch = 0.2
 # tilt_roll = 0.3
 # tilt_chance = 0.25
 # centre_chance = 0.25
+# glance_min = 0.2
 
 # How long a look is held before it picks somewhere new, and how long the move there takes:
 # move_min_s plus move_s_per_rad for every radian travelled.
@@ -497,6 +499,14 @@ mode = "walk"
 # doze_floor of their liveliness. 1 never dozes.
 # doze_tau_s = 90.0
 # doze_floor = 0.5
+
+# Yawning, once it has been idle yawn_after_s: about every yawn_every_s (0 never), for yawn_s,
+# the mouth opens to yawn_open and the head tips by yawn_pitch — signed, negative is up. Silent.
+# yawn_after_s = 45.0
+# yawn_every_s = 90.0
+# yawn_s = 3.0
+# yawn_open = 0.6
+# yawn_pitch = -0.15
 
 [media]
 # What mediad streams: the camera, and at what quality. Read by mediad at startup, so a change
