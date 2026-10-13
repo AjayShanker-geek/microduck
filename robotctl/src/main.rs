@@ -5299,7 +5299,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
             return run_version(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
         }
         Namespace::Vetbook { json } => {
-            return vetbook::run(&cli.robot_socket, &cli.config_socket, json);
+            return vetbook::run(&cli.robot_socket, &cli.config_socket, &cli.socket, json);
         }
         Namespace::Monitor { hz, json } => {
             return monitor::run(

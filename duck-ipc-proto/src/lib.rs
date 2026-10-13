@@ -457,7 +457,13 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`method::ROBOT_VETBOOK`] and [`method::ROBOT_VETBOOK_NOTE`]: the robot's lifetime record —
 /// hours on, distance walked, falls and pickups, every servo `robotd` has adopted and how long
 /// the one before it lasted, and dated notes ([`vetbook`]). New routes: a `robotd` predating them answers METHOD_NOT_FOUND, by name.
-pub const API_VERSION: u32 = 42;
+///
+/// # v43 — sharing the vet book
+///
+/// [`method::VETBOOK_SHARE`]: `updaterd` publishes the vet book to a public dataset on the signed-in
+/// Hugging Face account, `<user>/<robot name>-vetbook`, and answers with the link to its card
+/// ([`VetbookShareResult`]). A new route: an `updaterd` predating it answers METHOD_NOT_FOUND.
+pub const API_VERSION: u32 = 43;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -849,6 +855,11 @@ pub mod method {
     /// Forget the account. The robot stops being reachable from outside the LAN.
     pub const ACCOUNT_LOGOUT: &str = "account.logout";
 
+    /// Publish the vet book to the signed-in account, as a public dataset, and answer with the
+    /// link to its card — see [`crate::VetbookShareResult`]. Served by `updaterd`, which holds the
+    /// account and the network stack; the book itself comes from `robotd`.
+    pub const VETBOOK_SHARE: &str = "vetbook.share";
+
     /// Turn the connection into a stream of [`ROBOT_STATE`] notifications.
     pub const ROBOT_SUBSCRIBE: &str = "robot.subscribe";
     /// Server → client. Never carries an `id`.
@@ -1139,6 +1150,8 @@ pub enum Call {
     AccountStatus,
     /// Forget the account; see [`method::ACCOUNT_LOGOUT`].
     AccountLogout,
+    /// Publish the vet book; see [`method::VETBOOK_SHARE`].
+    VetbookShare,
     RobotSubscribe(SubscribeParams),
     // ── net.* ────────────────────────────────────────────────────────────────
     NetStatus,
@@ -1293,6 +1306,7 @@ impl Call {
             Call::AccountLogin(_) => method::ACCOUNT_LOGIN,
             Call::AccountStatus => method::ACCOUNT_STATUS,
             Call::AccountLogout => method::ACCOUNT_LOGOUT,
+            Call::VetbookShare => method::VETBOOK_SHARE,
             Call::RobotSubscribe(_) => method::ROBOT_SUBSCRIBE,
             Call::NetStatus => method::NET_STATUS,
             Call::NetScan => method::NET_SCAN,
@@ -1365,6 +1379,9 @@ impl Call {
                 // able to ask which account a robot thinks it belongs to.
                 | Call::AccountLogin(_)
                 | Call::AccountLogout
+                // Sharing publishes, in public and under the owner's name, something this robot
+                // knows about itself. Gated like signing in, since it acts as the account.
+                | Call::VetbookShare
         )
     }
 
@@ -1430,6 +1447,9 @@ impl Call {
             // Both read or write local state only. `status` is asked on a poll while a login is
             // in flight, so it must not queue behind anything.
             Call::AccountStatus | Call::AccountLogout => (Updater, Prompt),
+            // Three or four round trips to Hugging Face: a repo create and a commit, plus a read
+            // of the book from `robotd` and of the name from `configd`.
+            Call::VetbookShare => (Updater, Slow),
             // Owns its connection until the peer goes away and never reads another request.
             Call::Subscribe => (Updater, Stream),
 
@@ -1613,6 +1633,7 @@ impl Call {
             | Call::DetectorCheck
             | Call::AccountStatus
             | Call::AccountLogout
+            | Call::VetbookShare
             | Call::RobotMode => Value::Object(serde_json::Map::new()),
             Call::NetStatus
             | Call::NetScan
@@ -1695,6 +1716,7 @@ impl Call {
             method::ACCOUNT_LOGIN => Call::AccountLogin(decode(params)?),
             method::ACCOUNT_STATUS => Call::AccountStatus,
             method::ACCOUNT_LOGOUT => Call::AccountLogout,
+            method::VETBOOK_SHARE => Call::VetbookShare,
             method::ROBOT_SUBSCRIBE => Call::RobotSubscribe(decode(params)?),
             method::NET_STATUS => Call::NetStatus,
             method::NET_SCAN => Call::NetScan,
@@ -1871,6 +1893,7 @@ pub mod test_support {
             Call::AccountLogin(AccountLoginParams { force: false }),
             Call::AccountStatus,
             Call::AccountLogout,
+            Call::VetbookShare,
             Call::RobotLoadPolicy(LoadPolicyParams {
                 slot: Some("walk".into()),
                 path: Some("/var/lib/robot/policies/bouncy.onnx".into()),
@@ -2815,6 +2838,21 @@ pub struct Account {
     /// Whether a refresh token is stored, so an expiring access token can be renewed without
     /// anybody signing in again.
     pub refreshable: bool,
+}
+
+/// Answer to [`Call::VetbookShare`]: where the book went, and the link to show people.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VetbookShareResult {
+    /// The page to share: the card, with buttons to post it. Its preview image is the card, so the
+    /// link unfurls as the card wherever it is pasted.
+    pub url: String,
+    /// The card alone, as a PNG.
+    pub image: String,
+    /// The dataset the book was published to, `<user>/<robot name>-vetbook`.
+    pub dataset: String,
+    /// Which of the cards this share drew: `notebook`, `purikura` or `profile`.
+    pub card: String,
 }
 
 /// Answer to [`Call::AccountLogout`].
@@ -5767,7 +5805,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            71,
+            72,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }
@@ -5990,6 +6028,8 @@ mod tests {
                 // which account a robot thinks it belongs to is the first thing support asks.
                 method::ACCOUNT_LOGIN,
                 method::ACCOUNT_LOGOUT,
+                // Sharing publishes in public under the owner's name, acting as the account.
+                method::VETBOOK_SHARE,
                 method::NET_CONNECT,
                 method::NET_FORGET,
                 method::SYSTEM_SET_NAME,
