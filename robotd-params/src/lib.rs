@@ -79,6 +79,7 @@ pub struct Params {
     pub pickup: PickupParams,
     pub head_imu: HeadImuParams,
     pub chorale: ChoraleParams,
+    pub idle: IdleParams,
     pub media: MediaParams,
     ///
     /// `[detect]` until 2026-09: in `robotctl configure` that read as "detect what?", one line
@@ -851,6 +852,152 @@ pub struct ChoraleParams {
     /// Whether this robot may sing with others at all. `false` — and it is derived rather than
     /// written out, so that the default cannot be changed by editing one word.
     pub accept: bool,
+}
+
+/// `[idle]` — the robot looking around while nothing is happening (`robotd/src/idle_head.rs`).
+///
+/// After `after_s` with no motion asked for and nobody steering the head, it glances somewhere,
+/// holds the look while shifting its gaze a little around it, and picks somewhere new; a slow
+/// drift and a breath ride on top, and the longer it is left alone the calmer it gets. Every
+/// number here is a tuning knob for how alive that reads, nothing more: none of them can move
+/// the head further than `glance_yaw` + `nudge_yaw` + `drift` from where it was asked to be.
+///
+/// Angles are radians, durations seconds. Read once at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IdleParams {
+    /// Master switch.
+    pub enabled: bool,
+    /// Still for this long before it starts.
+    pub after_s: f64,
+    /// How long it takes to fade in, and out.
+    pub fade_s: f64,
+    /// How far a glance turns the head left or right at most.
+    pub glance_yaw: f64,
+    /// How far a glance tips it up or down at most.
+    pub glance_pitch: f64,
+    /// The curious sideways tilt a glance sometimes comes with.
+    pub tilt_roll: f64,
+    /// How often a glance comes with the tilt, 0..1.
+    pub tilt_chance: f64,
+    /// How often a glance goes back to the middle rather than somewhere new, 0..1.
+    pub centre_chance: f64,
+    /// How long one look lasts before it picks somewhere new, at full energy; dozing stretches
+    /// it.
+    pub hold_min_s: f64,
+    pub hold_max_s: f64,
+    /// How long a move takes: this much, plus `move_s_per_rad` for every radian it travels.
+    pub move_min_s: f64,
+    pub move_s_per_rad: f64,
+    /// While holding a look, the gaze shifts this far around it, yaw and pitch — the small
+    /// re-fixations that keep a held look from reading as frozen. Zero turns them off.
+    pub nudge_yaw: f64,
+    pub nudge_pitch: f64,
+    /// How long between those shifts.
+    pub nudge_every_min_s: f64,
+    pub nudge_every_max_s: f64,
+    /// The slow drift on every head axis, radians, and its frequency in Hz.
+    pub drift: f64,
+    pub drift_hz: f64,
+    /// The breath: metres of body height, and seconds per breath. Standing network only.
+    pub breath_m: f64,
+    pub breath_period_s: f64,
+    /// Dozing: seconds until it is mostly calmed down, and how calm it gets, 0..1 — 1 never
+    /// dozes.
+    pub doze_tau_s: f64,
+    pub doze_floor: f64,
+}
+
+impl Default for IdleParams {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            after_s: 2.0,
+            fade_s: 1.5,
+            glance_yaw: 0.6,
+            glance_pitch: 0.2,
+            tilt_roll: 0.3,
+            tilt_chance: 0.25,
+            centre_chance: 0.25,
+            hold_min_s: 1.0,
+            hold_max_s: 3.0,
+            move_min_s: 0.3,
+            move_s_per_rad: 1.0,
+            nudge_yaw: 0.08,
+            nudge_pitch: 0.05,
+            nudge_every_min_s: 0.4,
+            nudge_every_max_s: 1.2,
+            drift: 0.04,
+            drift_hz: 0.15,
+            breath_m: 0.001,
+            breath_period_s: 3.6,
+            doze_tau_s: 90.0,
+            doze_floor: 0.5,
+        }
+    }
+}
+
+impl IdleParams {
+    /// What is wrong with these values, if anything, as (key, reason).
+    fn invalid(&self) -> Option<(&'static str, &'static str)> {
+        let finite = [
+            ("after_s", self.after_s),
+            ("fade_s", self.fade_s),
+            ("glance_yaw", self.glance_yaw),
+            ("glance_pitch", self.glance_pitch),
+            ("tilt_roll", self.tilt_roll),
+            ("tilt_chance", self.tilt_chance),
+            ("centre_chance", self.centre_chance),
+            ("hold_min_s", self.hold_min_s),
+            ("hold_max_s", self.hold_max_s),
+            ("move_min_s", self.move_min_s),
+            ("move_s_per_rad", self.move_s_per_rad),
+            ("nudge_yaw", self.nudge_yaw),
+            ("nudge_pitch", self.nudge_pitch),
+            ("nudge_every_min_s", self.nudge_every_min_s),
+            ("nudge_every_max_s", self.nudge_every_max_s),
+            ("drift", self.drift),
+            ("drift_hz", self.drift_hz),
+            ("breath_m", self.breath_m),
+            ("breath_period_s", self.breath_period_s),
+            ("doze_tau_s", self.doze_tau_s),
+            ("doze_floor", self.doze_floor),
+        ];
+        if let Some((key, _)) = finite.iter().find(|(_, v)| !(v.is_finite() && *v >= 0.0)) {
+            return Some((key, "must be finite and nonnegative"));
+        }
+        // Each of these is divided by, or is what keeps a tick's motion from being a jump.
+        for (key, value) in [
+            ("fade_s", self.fade_s),
+            ("move_min_s", self.move_min_s),
+            ("breath_period_s", self.breath_period_s),
+            ("doze_tau_s", self.doze_tau_s),
+            ("doze_floor", self.doze_floor),
+        ] {
+            if value == 0.0 {
+                return Some((key, "must be above zero"));
+            }
+        }
+        if self.tilt_chance > 1.0 {
+            return Some(("tilt_chance", "is a probability, 0 to 1"));
+        }
+        if self.centre_chance > 1.0 {
+            return Some(("centre_chance", "is a probability, 0 to 1"));
+        }
+        if self.doze_floor > 1.0 {
+            return Some(("doze_floor", "must be at most 1 — 1 never dozes"));
+        }
+        if self.hold_min_s > self.hold_max_s {
+            return Some(("hold_min_s", "must not be above idle.hold_max_s"));
+        }
+        if self.nudge_every_min_s > self.nudge_every_max_s {
+            return Some((
+                "nudge_every_min_s",
+                "must not be above idle.nudge_every_max_s",
+            ));
+        }
+        None
+    }
 }
 
 /// `[theremin]` — the ToF theremin: what counts as a hand, and where the depth frames come
@@ -2278,6 +2425,12 @@ pub enum ParamsError {
         min: f64,
         max: f64,
     },
+    #[error("{path}: idle.{key} {reason}")]
+    Idle {
+        path: String,
+        key: &'static str,
+        reason: &'static str,
+    },
     #[error(
         "{path}: pickup.resume_threshold ({resume}) must be below pickup.pause_threshold \
          ({pause}), and both between 0 and 1 — they are a hysteresis band on a probability"
@@ -2388,6 +2541,13 @@ impl Params {
                     max,
                 });
             }
+        }
+        if let Some((key, reason)) = self.idle.invalid() {
+            return Err(ParamsError::Idle {
+                path: path.display().to_string(),
+                key,
+                reason,
+            });
         }
         // Refused rather than clamped, like `control.hz`: the editor should say which value it
         // was not going to guess at. The floor is 10 because netpadd's 100 ms fallback tick must
@@ -3777,6 +3937,26 @@ mod tests {
 
     /// The two thresholds are a hysteresis band. Inverted, the latch would pause and resume on
     /// the same probability — refused, so `robotctl configure` cannot write it.
+    /// `[idle]` values the look-around would divide by, or that put a range backwards, are
+    /// refused by name; an ordinary retune loads.
+    #[test]
+    fn a_broken_idle_tuning_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (text, key) in [
+            ("[idle]\nfade_s = 0.0\n", "idle.fade_s"),
+            ("[idle]\nhold_min_s = 4.0\n", "idle.hold_min_s"),
+            ("[idle]\ntilt_chance = 2.0\n", "idle.tilt_chance"),
+            ("[idle]\nnudge_yaw = -0.1\n", "idle.nudge_yaw"),
+        ] {
+            let path = write(dir.path(), text);
+            let error = Params::load(&path, true).unwrap_err().to_string();
+            assert!(error.contains(key), "{error}");
+        }
+        let path = write(dir.path(), "[idle]\nhold_max_s = 1.5\nnudge_yaw = 0.0\n");
+        let idle = Params::load(&path, true).unwrap().idle;
+        assert_eq!((idle.hold_max_s, idle.nudge_yaw), (1.5, 0.0));
+    }
+
     #[test]
     fn an_inverted_pickup_band_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -3858,6 +4038,7 @@ mod tests {
         assert_eq!(from_file.policy.resolved(), built_in.policy.resolved());
         assert_eq!(from_file.safety.limp_fall, built_in.safety.limp_fall);
         assert_eq!(from_file.pickup, built_in.pickup);
+        assert_eq!(from_file.idle, built_in.idle);
         assert_eq!(
             from_file.safety.battery_empty_shutdown,
             built_in.safety.battery_empty_shutdown

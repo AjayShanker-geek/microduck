@@ -347,6 +347,109 @@ pub const REGISTRY: &[Entry] = &[
         Kind::Bool,
         "Sing with nearby ducks — off means silent AND invisible on the air",
     ),
+    // ── [idle] ───────────────────────────────────────────────────────────────
+    feature(
+        "idle.enabled",
+        Kind::Bool,
+        "Look around while nothing is happening",
+    ),
+    entry(
+        "idle.after_s",
+        Kind::Float,
+        "Seconds still before it starts looking around",
+    ),
+    entry("idle.fade_s", Kind::Float, "Seconds to fade in, and out"),
+    entry(
+        "idle.glance_yaw",
+        Kind::Float,
+        "Furthest a glance turns left or right, radians",
+    ),
+    entry(
+        "idle.glance_pitch",
+        Kind::Float,
+        "Furthest a glance tips up or down, radians",
+    ),
+    entry(
+        "idle.tilt_roll",
+        Kind::Float,
+        "The curious sideways tilt, radians",
+    ),
+    entry(
+        "idle.tilt_chance",
+        Kind::Float,
+        "How often a glance comes with the tilt, 0..1",
+    ),
+    entry(
+        "idle.centre_chance",
+        Kind::Float,
+        "How often a glance goes back to the middle, 0..1",
+    ),
+    entry(
+        "idle.hold_min_s",
+        Kind::Float,
+        "Shortest look before picking somewhere new, seconds",
+    ),
+    entry(
+        "idle.hold_max_s",
+        Kind::Float,
+        "Longest look before picking somewhere new, seconds",
+    ),
+    entry(
+        "idle.move_min_s",
+        Kind::Float,
+        "Seconds a move takes, plus move_s_per_rad per radian",
+    ),
+    entry(
+        "idle.move_s_per_rad",
+        Kind::Float,
+        "Extra seconds a move takes per radian travelled",
+    ),
+    entry(
+        "idle.nudge_yaw",
+        Kind::Float,
+        "Small gaze shifts while holding a look, yaw radians; 0 = none",
+    ),
+    entry(
+        "idle.nudge_pitch",
+        Kind::Float,
+        "Small gaze shifts while holding a look, pitch radians; 0 = none",
+    ),
+    entry(
+        "idle.nudge_every_min_s",
+        Kind::Float,
+        "Shortest gap between those shifts, seconds",
+    ),
+    entry(
+        "idle.nudge_every_max_s",
+        Kind::Float,
+        "Longest gap between those shifts, seconds",
+    ),
+    entry(
+        "idle.drift",
+        Kind::Float,
+        "Slow drift on every head axis, radians",
+    ),
+    entry(
+        "idle.drift_hz",
+        Kind::Float,
+        "How fast the drift wanders, Hz",
+    ),
+    entry(
+        "idle.breath_m",
+        Kind::Float,
+        "Breath, metres of body height (standing network only)",
+    ),
+    entry("idle.breath_period_s", Kind::Float, "Seconds per breath"),
+    entry(
+        "idle.doze_tau_s",
+        Kind::Float,
+        "Seconds until it has mostly calmed down",
+    ),
+    entry(
+        "idle.doze_floor",
+        Kind::Float,
+        "How calm it gets, 0..1 — 1 never dozes",
+    ),
     // ── [pickup] ─────────────────────────────────────────────────────────────
     feature(
         "pickup.enabled",
@@ -1157,6 +1260,7 @@ mod tests {
                 "safety.limp_fall",
                 "duck_detector.enabled",
                 "chorale.accept",
+                "idle.enabled",
                 "pickup.enabled",
                 "theremin.enabled",
                 "head_imu.enabled",

@@ -603,11 +603,15 @@ shorter drop-out is silent.
 When the pad comes back it greets you with a quack; A stands the robot up.
 
 **Left alone, the robot looks around.** After 2 s with the policy running, no motion asked for
-and nobody steering the head, it glances about every few seconds — mostly left and right, a
-little up and down, now and then with a curious tilt — holds each look, drifts very slightly
-while it does, and breathes (a millimetre of height, standing only). The longer nothing happens
-the calmer it gets. It fades in and out, and any stick or head command takes the head back. In
-the D-pad's head modes the pad keeps the head, so this only happens in move mode. On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
+and nobody steering the head, it glances about every second or few — mostly left and right, a
+little up and down, now and then with a curious tilt — and while it holds a look its gaze keeps
+shifting a little around it. It drifts slightly and breathes (a millimetre of height, standing
+only). The longer nothing happens the calmer it gets. It fades in and out, and any stick or head
+command takes the head back. In the D-pad's head modes the pad keeps the head, so this only
+happens in move mode. Every number is in `[idle]` — `sudo robotctl configure`, then restart
+`robotd`.
+
+On a roller robot (`mode = "roller"` in `robotd.toml`) the sticks take the roller
 shaping automatically — asymmetric push/brake, no strafe — and B triggers the crouch. The
 other skills ride along: sit and the kicks work on wheels too, as the prototype has it.
 

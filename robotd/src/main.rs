@@ -2241,6 +2241,7 @@ async fn control_loop<T: RobotIo>(
     // The robot looking around while nothing is happening — see `idle_head`. Seeded from the
     // clock, so two robots side by side do not glance in step.
     let mut idle_head = idle_head::IdleHead::new(
+        params.idle,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64),
@@ -3073,7 +3074,7 @@ async fn control_loop<T: RobotIo>(
             && !pickup_paused
             && twist_target == [0.0; 3]
             && twist_ema.iter().all(|v| v.abs() < 1e-3)
-            && snapshot.head_age >= idle_head::IDLE_AFTER
+            && snapshot.head_age >= idle_head.after()
             && chorale_head.iter().all(|v| v.abs() < 1e-3)
             && controller.as_ref().is_some_and(|c| !c.busy());
         let idle = idle_head.tick(tick_start, still, period);
