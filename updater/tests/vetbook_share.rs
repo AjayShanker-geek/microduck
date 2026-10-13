@@ -178,7 +178,12 @@ async fn a_share_creates_a_public_dataset_and_commits_the_book() {
         result.url,
         format!("{}/d/apirrone/graphite-bang", updater::vetbook::SPACE_URL)
     );
-    assert_eq!(result.image, format!("{}/card.png", result.url));
+    // A new image address each share, so the README's image and link previews are not stale.
+    assert!(
+        result
+            .image
+            .starts_with(&format!("{}/card.png?v=", result.url))
+    );
     assert!(updater::vetbook::CARDS.contains(&result.card.as_str()));
 
     let hub = hub.lock().unwrap();

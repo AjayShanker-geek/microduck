@@ -131,7 +131,11 @@ pub async fn share(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let shared = shared_copy(book, &name, &user, card, now);
-    let readme = dataset_card(&name, &user, &url);
+    // This share's own image address: the Space draws the latest book whatever `v` says, but a new
+    // address is what makes Hugging Face's image proxy (the README) and a social network's preview
+    // fetch it again rather than show the last share's card.
+    let image = format!("{url}/card.png?v={now}");
+    let readme = dataset_card(&name, &user, &url, &image);
 
     let endpoint = account.config().endpoint.trim_end_matches('/').to_owned();
     let client = crate::source::http::client()?;
@@ -160,7 +164,7 @@ pub async fn share(
 
     tracing::info!(%repo, card, "vet book shared");
     Ok(proto::VetbookShareResult {
-        image: format!("{url}/card.png"),
+        image,
         url,
         dataset: repo,
         card: card.to_owned(),
@@ -249,10 +253,10 @@ pub fn shared_copy(
 }
 
 /// The dataset's `README.md`: what this is, the card, and where it came from.
-fn dataset_card(name: &str, user: &str, url: &str) -> String {
+fn dataset_card(name: &str, user: &str, url: &str, image: &str) -> String {
     format!(
         "---\npretty_name: \"{name}'s vet book\"\ntags:\n- microduck\n- robotics\n- pollen-robotics\n\
-         - vetbook\n---\n\n# {name}'s vet book\n\n[![{name}'s vet book card]({url}/card.png)]({url})\n\n\
+         - vetbook\n---\n\n# {name}'s vet book\n\n[![{name}'s vet book card]({image})]({url})\n\n\
          The lifetime record of **{name}**, a [microduck](https://pollen-robotics.com) belonging to \
          [@{user}](https://huggingface.co/{user}): hours awake, distance walked, falls, cuddles, \
          tricks, and every servo it has been through. Shared from the robot with \
