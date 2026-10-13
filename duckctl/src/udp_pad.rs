@@ -289,6 +289,8 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
     let mut gilrs = Gilrs::new().map_err(|e| format!("no gamepad subsystem: {e}"))?;
     let to = target(host);
     let socket = UdpSocket::bind("0.0.0.0:0")?;
+    // Best effort: Windows may refuse it, and the datagrams go unmarked, as they did before.
+    let _ = socket2::SockRef::from(&socket).set_tos_v4(pad_map::wire::TOS);
     socket.connect(&to)?;
     let answers = listen(&socket)?;
     let mut pacer = Pacer::new(Duration::from_secs_f64(1.0 / f64::from(hz)));
