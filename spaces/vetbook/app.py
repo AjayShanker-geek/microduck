@@ -116,7 +116,9 @@ async def render(card: cards.Card, template: str, width: int, height: int) -> by
             await page.close()
 
 
-async def cached_png(user: str, duck: str, style: str | None, season: str | None, story: bool) -> Response:
+async def cached_png(
+    user: str, duck: str, style: str | None, season: str | None, story: bool, versioned: bool
+) -> Response:
     check(user, duck)
     found = await fetch(user, duck)
     if found is None:
@@ -133,18 +135,23 @@ async def cached_png(user: str, duck: str, style: str | None, season: str | None
             pngs.popitem(last=False)
     else:
         pngs.move_to_end(key)
-    return Response(png, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+    # A versioned address (`?v=<share time>`) names one share's card, which never changes, so it can
+    # be kept; the bare address is always the latest share, so nothing may keep it.
+    cache = "public, max-age=86400" if versioned else "no-cache"
+    return Response(png, media_type="image/png", headers={"Cache-Control": cache})
 
 
 @app.get("/d/{user}/{duck}/card.png")
-async def card_png(user: str, duck: str, card: str | None = None, season: str | None = None):
-    return await cached_png(user, duck, card, season, story=False)
+async def card_png(
+    user: str, duck: str, card: str | None = None, season: str | None = None, v: str | None = None
+):
+    return await cached_png(user, duck, card, season, story=False, versioned=v is not None)
 
 
 @app.get("/d/{user}/{duck}/story.png")
-async def story_png(user: str, duck: str, season: str | None = None):
+async def story_png(user: str, duck: str, season: str | None = None, v: str | None = None):
     """The same duck as a 1080 × 1920 story, for Instagram and TikTok."""
-    return await cached_png(user, duck, None, season, story=True)
+    return await cached_png(user, duck, None, season, story=True, versioned=v is not None)
 
 
 @app.get("/d/{user}/{duck}", response_class=HTMLResponse)
@@ -168,7 +175,10 @@ async def share_page(user: str, duck: str, request: Request):
         )
     book, _ = found
     c = cards.card_for(book, user, duck, request.query_params.get("card"))
-    query = f"?card={c.style}" if request.query_params.get("card") else ""
+    # Each share gets its own image address, so a browser or a social network that kept the last
+    # share's card fetches this one instead of showing the old one under the same link.
+    version = (book.get("share") or {}).get("shared_at") or 0
+    query = f"?v={version}" + (f"&card={c.style}" if request.query_params.get("card") else "")
     return template.render(
         card=c,
         robot=c.robot,
@@ -182,7 +192,7 @@ async def share_page(user: str, duck: str, request: Request):
         url=url,
         image=f"{url}/card.png{query}",
         # The same duck as a 1080 × 1920 story, for Instagram and TikTok.
-        story=f"{url}/story.png",
+        story=f"{url}/story.png?v={version}",
     )
 
 
