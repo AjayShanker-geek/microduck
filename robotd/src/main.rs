@@ -3810,6 +3810,7 @@ async fn control_loop<T: RobotIo>(
             dt,
             torqued: bringup != Bringup::Limp && !powered_off,
             label: &policy_label,
+            twist: command.twist,
             in_hands: pickup_paused,
             fallen: safety.fallen(),
             limp_falling: matches!(limp_fall, LimpFall::Limp { .. }),

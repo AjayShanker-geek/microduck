@@ -148,12 +148,15 @@ pub struct Wear {
     pub trips: Trips,
 }
 
-/// Latched alerts, one counter per `Hardware Error Status` bit.
+/// Latched alerts, one counter per `Hardware Error Status` bit that means something here.
+///
+/// **Bit 0, input voltage, is not counted.** The servos are fed the 2S pack straight, above their
+/// own 6 V rating (`robotd-design.md` §3.2), so every servo latches it on every power-up of a
+/// charged pack — counted, it reported every joint tripped on a healthy robot. A book written
+/// before it was dropped may carry a `voltage` count; it is ignored on load.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Trips {
-    /// Bit 0: input voltage out of range.
-    pub voltage: u64,
     /// Bit 2: overheating.
     pub overheat: u64,
     /// Bit 3: motor encoder.
@@ -169,7 +172,6 @@ impl Trips {
     pub fn count(&mut self, was: u8, now: u8) {
         let up = now & !was;
         for (bit, counter) in [
-            (0, &mut self.voltage),
             (2, &mut self.overheat),
             (3, &mut self.encoder),
             (4, &mut self.shock),
@@ -182,11 +184,10 @@ impl Trips {
     }
 
     pub fn total(&self) -> u64 {
-        self.voltage + self.overheat + self.encoder + self.shock + self.overload
+        self.overheat + self.encoder + self.shock + self.overload
     }
 
     pub fn add(&mut self, other: &Trips) {
-        self.voltage += other.voltage;
         self.overheat += other.overheat;
         self.encoder += other.encoder;
         self.shock += other.shock;
@@ -363,6 +364,9 @@ mod tests {
     #[test]
     fn a_trip_is_counted_when_its_bit_comes_up_not_while_it_stays() {
         let mut trips = Trips::default();
+        // Input voltage, latched by every servo on a charged pack: never a trip.
+        trips.count(0, 0b1);
+        assert_eq!(trips.total(), 0);
         trips.count(0, 0b10_0000);
         trips.count(0b10_0000, 0b10_0000);
         trips.count(0b10_0000, 0b11_0100);
@@ -370,6 +374,13 @@ mod tests {
         assert_eq!(trips.shock, 1);
         assert_eq!(trips.overheat, 1);
         assert_eq!(trips.total(), 3);
+    }
+
+    #[test]
+    fn a_book_with_voltage_trips_still_loads() {
+        let old = r#"{"motors":[{"id":20,"wear":{"trips":{"voltage":1,"overload":2}}}]}"#;
+        let book: Vetbook = serde_json::from_str(old).unwrap();
+        assert_eq!(book.motors[0].wear.trips.total(), 2);
     }
 
     #[test]

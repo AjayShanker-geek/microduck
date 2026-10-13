@@ -123,16 +123,6 @@ struct Cli {
 
 /// Only `update` exists today, plus `version`. The namespace layer is here so adding
 /// `robotctl motors` later is additive rather than a restructure.
-/// `robotctl vetbook …`
-#[derive(Subcommand, Debug)]
-enum VetbookCommand {
-    /// Write a dated line in the diary: "reglued the beak", "new feet".
-    Note {
-        #[arg(required = true, num_args = 1..)]
-        text: Vec<String>,
-    },
-}
-
 #[derive(Subcommand, Debug)]
 enum Namespace {
     /// Save one fresh raw UYVY frame; geometry is printed to stderr.
@@ -193,15 +183,12 @@ enum Namespace {
     /// `/var/lib/robot/vetbook.json`, so it survives updates and lasts the life of the robot.
     /// A servo swap is written down by itself, when `robotd` adopts a factory-fresh servo.
     ///
-    /// On a terminal it opens a live page (`q` quits, `←`/`→` tabs); piped, it prints plain
-    /// text.
+    /// On a terminal it opens a live page (`q` quits, `←`/`→` tabs, `n` writes a dated line in
+    /// the diary); piped, it prints plain text.
     Vetbook {
         /// The book as JSON, exactly as `robot.vetbook` answers it.
         #[arg(long)]
         json: bool,
-
-        #[command(subcommand)]
-        command: Option<VetbookCommand>,
     },
 
     /// Switch the flashlight — the beta face's RGB LED. `robotd` owns it, so this asks rather than
@@ -5311,9 +5298,8 @@ fn run(cli: Cli) -> Result<(), Failure> {
         Namespace::Version { json } => {
             return run_version(&cli.socket, &cli.robot_socket, &cli.config_socket, json);
         }
-        Namespace::Vetbook { json, command } => {
-            let note = command.map(|VetbookCommand::Note { text }| text.join(" "));
-            return vetbook::run(&cli.robot_socket, &cli.config_socket, json, note);
+        Namespace::Vetbook { json } => {
+            return vetbook::run(&cli.robot_socket, &cli.config_socket, json);
         }
         Namespace::Monitor { hz, json } => {
             return monitor::run(

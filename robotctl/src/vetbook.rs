@@ -3,8 +3,9 @@
 //!
 //! The book is `robotd`'s (`robot.vetbook`; the record itself is `duck_ipc_proto::vetbook`). This
 //! is the page it is read on: three tabs — the life, the motors, the diary — refreshed every two
-//! seconds, so the walking hours tick up while you watch the duck walk. Piped, it prints the same
-//! three as plain text; `--json` gives the book as it is.
+//! seconds, so the walking hours tick up while you watch the duck walk. `n` writes a line in the
+//! diary from the page itself. Piped, it prints the same three as plain text; `--json` gives the
+//! book as it is.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -38,17 +39,12 @@ const LILAC: Color = Color::Indexed(141);
 const DIM: Color = Color::Indexed(244);
 const ALERT: Color = Color::Indexed(203);
 
-const DUCK_ART: [&str; 4] = ["   __    ", " <(o )___ ", "  ( ._> / ", "   `---'  "];
+/// A microduck's head, side on: the rounded shell, the one big camera eye at the front, and the
+/// flat beak underneath, sticking out past it.
+const HEAD_ART: [&str; 4] = [" ╭───────╮ ", " │   (◉) │ ", " ╰───────╯ ", "▀▀▀▀▀▀▀▀▀▀▀▀"];
+const SHELL: Color = Color::Indexed(252);
 
-pub fn run(
-    robot_socket: &Path,
-    config_socket: &Path,
-    json: bool,
-    note: Option<String>,
-) -> Result<(), Failure> {
-    if let Some(text) = note {
-        return write_note(robot_socket, &text);
-    }
+pub fn run(robot_socket: &Path, config_socket: &Path, json: bool) -> Result<(), Failure> {
     let book = fetch(robot_socket)?;
     if json {
         println!(
@@ -74,6 +70,7 @@ fn fetch(socket: &Path) -> Result<Vetbook, Failure> {
     decode(&result_of(client.call(&proto::Call::RobotVetbook)?)?)
 }
 
+/// `robot.vetbookNote`. The robot's refusal comes back as the error, worded for the page.
 fn write_note(socket: &Path, text: &str) -> Result<(), Failure> {
     let mut client = Client::connect_to("robotd", socket)?;
     client.hello()?;
@@ -89,7 +86,6 @@ fn write_note(socket: &Path, text: &str) -> Result<(), Failure> {
             .unwrap_or_else(|| "the robot refused".to_owned());
         return Err(Failure::new(exit::REFUSED, reason));
     }
-    println!("✎ written in the vet book");
     Ok(())
 }
 
@@ -140,6 +136,10 @@ struct Page {
     /// Why the last refresh failed, shown in the footer while the old book stays up.
     stale: Option<String>,
     now: i64,
+    /// A diary line being typed, while `n` has the keyboard.
+    draft: Option<String>,
+    /// What came of the last line written, shown in the footer for a few seconds.
+    written: Option<(Result<(), String>, Instant)>,
 }
 
 fn live(
@@ -156,6 +156,8 @@ fn live(
         diary_scroll: 0,
         stale: None,
         now: crate::unix_now(),
+        draft: None,
+        written: None,
     };
     let mut fetched = Instant::now();
     loop {
@@ -170,6 +172,30 @@ fn live(
             && key.kind == KeyEventKind::Press
         {
             let rows = page.book.motors.len();
+            // While a line is being typed every key is text, `q` included.
+            if let Some(draft) = page.draft.as_mut() {
+                match key.code {
+                    KeyCode::Esc => page.draft = None,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        page.draft = None
+                    }
+                    KeyCode::Enter => {
+                        let text = page.draft.take().unwrap_or_default();
+                        if !text.trim().is_empty() {
+                            let outcome = write_note(socket, &text).map_err(|e| e.message);
+                            page.written = Some((outcome, Instant::now()));
+                            page.diary_scroll = 0;
+                            fetched = Instant::now() - REFRESH;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        draft.pop();
+                    }
+                    KeyCode::Char(c) => draft.push(c),
+                    _ => {}
+                }
+                continue;
+            }
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -200,8 +226,19 @@ fn live(
                     Tab::Life => {}
                 },
                 KeyCode::Char('r') => fetched = Instant::now() - REFRESH,
+                KeyCode::Char('n') => {
+                    page.tab = Tab::Diary;
+                    page.draft = Some(String::new());
+                }
                 _ => {}
             }
+        }
+        if page
+            .written
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
+        {
+            page.written = None;
         }
         if fetched.elapsed() >= REFRESH {
             fetched = Instant::now();
@@ -244,16 +281,38 @@ impl Page {
             Tab::Diary => self.render_diary(body, buf),
         }
 
-        let mut keys = vec![
-            Span::styled(" q", Style::new().fg(DUCK).bold()),
-            Span::styled(" quit  ", Style::new().fg(DIM)),
-            Span::styled("←→", Style::new().fg(DUCK).bold()),
-            Span::styled(" tabs  ", Style::new().fg(DIM)),
-            Span::styled("↑↓", Style::new().fg(DUCK).bold()),
-            Span::styled(" scroll  ", Style::new().fg(DIM)),
-            Span::styled("robotctl vetbook note \"…\"", Style::new().fg(DUCK).bold()),
-            Span::styled(" to write in it", Style::new().fg(DIM)),
-        ];
+        let key = |k: &'static str| Span::styled(k, Style::new().fg(DUCK).bold());
+        let what = |w: &'static str| Span::styled(w, Style::new().fg(DIM));
+        let mut keys = if self.draft.is_some() {
+            vec![
+                key(" ⏎"),
+                what(" write it in the diary  "),
+                key("esc"),
+                what(" never mind"),
+            ]
+        } else {
+            vec![
+                key(" q"),
+                what(" quit  "),
+                key("←→"),
+                what(" tabs  "),
+                key("↑↓"),
+                what(" scroll  "),
+                key("n"),
+                what(" write in the diary"),
+            ]
+        };
+        match &self.written {
+            Some((Ok(()), _)) => keys.push(Span::styled(
+                "   ✎ written in the vet book",
+                Style::new().fg(LEAF).bold(),
+            )),
+            Some((Err(e), _)) => keys.push(Span::styled(
+                format!("   ⚠ not written: {e}"),
+                Style::new().fg(ALERT),
+            )),
+            None => {}
+        }
         if let Some(stale) = &self.stale {
             keys.push(Span::styled(
                 format!("   ⚠ not refreshed: {stale}"),
@@ -270,29 +329,22 @@ impl Page {
         let inner = block.inner(area);
         block.render(area, buf);
         let [art, text] =
-            Layout::horizontal([Constraint::Length(12), Constraint::Min(10)]).areas(inner);
+            Layout::horizontal([Constraint::Length(14), Constraint::Min(10)]).areas(inner);
 
-        let art_lines: Vec<Line> = DUCK_ART
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                // The beak in orange, the rest of the duck in yellow.
-                if i == 2 {
-                    let (body, beak) = l.split_at(5);
-                    Line::from(vec![
-                        Span::styled(body, Style::new().fg(DUCK)),
-                        Span::styled(beak, Style::new().fg(BEAK)),
-                    ])
-                } else if i == 1 {
-                    Line::from(vec![
-                        Span::styled(" <", Style::new().fg(BEAK)),
-                        Span::styled(&l[2..], Style::new().fg(DUCK)),
-                    ])
-                } else {
-                    Line::styled(*l, Style::new().fg(DUCK))
-                }
-            })
-            .collect();
+        // The shell in white, the lens ringed in orange, the beak orange.
+        let shell = Style::new().fg(SHELL);
+        let art_lines = vec![
+            Line::styled(HEAD_ART[0], shell),
+            Line::from(vec![
+                Span::styled(" │   ", shell),
+                Span::styled("(", Style::new().fg(BEAK).bold()),
+                Span::styled("◉", Style::new().fg(POND).bold()),
+                Span::styled(")", Style::new().fg(BEAK).bold()),
+                Span::styled(" │ ", shell),
+            ]),
+            Line::styled(HEAD_ART[2], shell),
+            Line::styled(HEAD_ART[3], Style::new().fg(BEAK)),
+        ];
         Paragraph::new(art_lines).render(art, buf);
 
         let b = &self.book;
@@ -651,7 +703,6 @@ impl Page {
                 trip("overheat", t.overheat),
                 trip("shock", t.shock),
                 trip("encoder", t.encoder),
-                trip("voltage", t.voltage),
             ]),
         ];
         if m.retired.is_empty() {
@@ -695,7 +746,42 @@ impl Page {
     }
 
     fn render_diary(&self, area: Rect, buf: &mut Buffer) {
-        let block = panel("diary — newest first");
+        let (area, input) = match &self.draft {
+            Some(_) => {
+                let [list, input] =
+                    Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
+                (list, Some(input))
+            }
+            None => (area, None),
+        };
+        if let (Some(input), Some(draft)) = (input, &self.draft) {
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(LILAC))
+                .title(Span::styled(
+                    " ✎ dear diary… ",
+                    Style::new().fg(LILAC).bold(),
+                ));
+            let inner = block.inner(input);
+            block.render(input, buf);
+            // Keep the end of a long line in view: the cursor is where the typing is.
+            let room = inner.width.saturating_sub(3) as usize;
+            let shown: String = {
+                let chars: Vec<char> = draft.chars().collect();
+                chars[chars.len().saturating_sub(room)..].iter().collect()
+            };
+            Line::from(vec![
+                Span::styled("✎ ", Style::new().fg(LILAC)),
+                Span::raw(shown),
+                Span::styled(
+                    "▏",
+                    Style::new().fg(DUCK).add_modifier(Modifier::SLOW_BLINK),
+                ),
+            ])
+            .render(inner, buf);
+        }
+
+        let block = panel("diary — newest first · n to write");
         let inner = block.inner(area);
         block.render(area, buf);
         let lines: Vec<Line> = self
@@ -818,7 +904,7 @@ fn render_body_map(motors: &[MotorRecord], selected: usize, area: Rect, buf: &mu
     let lines = vec![
         Line::from(vec![s("       ╭────────╮")]),
         Line::from(vec![
-            s("       │  ◕  ◕  │"),
+            s("       │   (◉)  │"),
             Span::styled("▶ ", Style::new().fg(BEAK)),
             dot("mouth"),
         ]),
@@ -916,10 +1002,11 @@ fn verdict(book: &Vetbook) -> (String, Color) {
     let hot = book.motors.iter().filter(|m| m.wear.hot_s > 600.0).count();
     let life = &book.life;
     if !tripped.is_empty() {
-        (
-            format!("check-up advised — tripped: {}", tripped.join(", ")),
-            ALERT,
-        )
+        let named = match tripped.len() {
+            n if n <= 3 => tripped.join(", "),
+            n => format!("{} and {} more", tripped[..2].join(", "), n - 2),
+        };
+        (format!("check-up advised — tripped: {named}"), ALERT)
     } else if hot > 0 {
         (
             format!(
@@ -1143,6 +1230,10 @@ mod tests {
     }
 
     fn draw(tab: Tab, width: u16) -> String {
+        draw_with(tab, width, None)
+    }
+
+    fn draw_with(tab: Tab, width: u16, draft: Option<&str>) -> String {
         let mut page = Page {
             book: sample(),
             name: "lavender-star".into(),
@@ -1151,6 +1242,8 @@ mod tests {
             diary_scroll: 0,
             stale: None,
             now: 1_760_300_000,
+            draft: draft.map(str::to_owned),
+            written: None,
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(width, 40)).unwrap();
         terminal
@@ -1199,6 +1292,28 @@ mod tests {
                 std::fs::write(format!("{dir}/{name}-{width}.txt"), draw(tab, width)).unwrap();
             }
         }
+        let typing = draw_with(Tab::Diary, 100, Some("new feet, and the left knee"));
+        std::fs::write(format!("{dir}/typing-100.txt"), typing).unwrap();
+    }
+
+    #[test]
+    fn a_line_being_typed_is_on_the_diary_page() {
+        let page = draw_with(Tab::Diary, 80, Some("new feet"));
+        assert!(page.contains("dear diary"), "{page}");
+        assert!(page.contains("✎ new feet"));
+        assert!(page.contains("never mind"));
+        assert!(page.contains("reglued the beak"));
+    }
+
+    #[test]
+    fn voltage_is_not_a_trip() {
+        let mut book = sample();
+        for m in &mut book.motors {
+            m.wear.trips.count(0, 0b1);
+        }
+        assert_eq!(verdict(&book).1, ALERT, "the knee's overload still counts");
+        book.motors[3].wear.trips = Default::default();
+        assert_ne!(verdict(&book).1, ALERT);
     }
 
     #[test]

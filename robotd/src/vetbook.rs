@@ -38,6 +38,12 @@ pub const SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60
 /// the better part of a volt.
 const CHARGE_JUMP_V: f64 = 0.4;
 
+/// Below these, a commanded twist is standing still: metres per second across the ground, and
+/// radians per second about the vertical. The applied command is smoothed, so a released stick
+/// decays towards zero rather than reaching it — a threshold is what ends the walk.
+const WALK_SPEED: f64 = 0.02;
+const WALK_TURN: f64 = 0.1;
+
 /// Unix seconds now, or zero on a clock before 1970 — which a board with no RTC can have.
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -218,6 +224,8 @@ pub struct Facts<'a> {
     pub torqued: bool,
     /// Which net drove, as `robot.state` labels it.
     pub label: &'a str,
+    /// The twist the gait was handed this tick, after smoothing and safety: `[vx, vy, wz]`.
+    pub twist: [f64; 3],
     pub in_hands: bool,
     pub fallen: bool,
     pub limp_falling: bool,
@@ -271,9 +279,15 @@ impl Tracker {
                 wear.torqued_s += dt;
             }
         }
+        // **Walking is a velocity, not a network.** Velstand is one net that walks and stands,
+        // and labels every tick `walk`; a robot with a separate stand net labels the still ones
+        // `stand`. Either way, what separates the two is whether it was asked to move.
+        let gait = matches!(f.label, "walk" | "stand");
+        let walking =
+            gait && (f.twist[0].hypot(f.twist[1]) > WALK_SPEED || f.twist[2].abs() > WALK_TURN);
         match f.label {
-            "walk" => life.walking_s += dt,
-            "stand" => life.standing_s += dt,
+            _ if walking => life.walking_s += dt,
+            _ if gait => life.standing_s += dt,
             "sit" | "rise" => life.sitting_s += dt,
             _ => {}
         }
@@ -326,11 +340,11 @@ impl Tracker {
         self.limp_falling = f.limp_falling;
         self.singing = f.singing;
 
-        // Ground covered: only while the gait drives, so odometry's drift on a standing robot
-        // and a robot carried across the room are not distance walked.
+        // Ground covered: only while walking, so odometry's drift on a standing robot and a robot
+        // carried across the room are not distance walked.
         let (pos, yaw) = f.odom;
         if let Some((was, was_yaw)) = self.odom
-            && f.label == "walk"
+            && walking
         {
             life.distance_m += (pos[0] - was[0]).hypot(pos[1] - was[1]);
             let turn = (yaw - was_yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
@@ -499,6 +513,7 @@ mod tests {
             dt: 0.02,
             torqued: true,
             label,
+            twist: [0.2, 0.0, 0.0],
             in_hands: false,
             fallen: false,
             limp_falling: false,
@@ -542,14 +557,31 @@ mod tests {
     }
 
     #[test]
+    fn velstand_standing_still_is_standing() {
+        let mut t = Tracker::default();
+        // Velstand labels every tick `walk`; a zero twist is a robot standing.
+        let mut f = facts("walk", None);
+        f.twist = [0.0, 0.0, 0.0];
+        t.tick(&f);
+        // A released stick still decaying through the smoothing: standing.
+        f.twist = [0.01, 0.0, 0.05];
+        t.tick(&f);
+        // Turning on the spot is walking.
+        f.twist = [0.0, 0.0, 0.5];
+        t.tick(&f);
+        assert!((t.life.standing_s - 0.04).abs() < 1e-9);
+        assert!((t.life.walking_s - 0.02).abs() < 1e-9);
+    }
+
+    #[test]
     fn only_walking_covers_ground() {
         let mut t = Tracker::default();
         let mut f = facts("walk", None);
         t.tick(&f);
         f.odom = ([0.3, 0.4, 0.0], 0.5);
         t.tick(&f);
-        // Carried a metre while standing: not walked.
-        f.label = "stand";
+        // Odometry moving a metre while asked to stand still — drift, or a shove: not walked.
+        f.twist = [0.0; 3];
         f.odom = ([1.3, 0.4, 0.0], 0.5);
         t.tick(&f);
         assert!((t.life.distance_m - 0.5).abs() < 1e-9);
