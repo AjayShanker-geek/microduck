@@ -1182,6 +1182,7 @@ dependencies = [
  "pad-map",
  "ratatui",
  "serde_json",
+ "socket2",
  "tokio",
  "webbrowser",
 ]
@@ -2919,6 +2920,7 @@ dependencies = [
  "pad-map",
  "robotd-params",
  "serde_json",
+ "socket2",
  "tempfile",
  "tokio",
  "tracing",

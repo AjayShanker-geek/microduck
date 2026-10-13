@@ -134,6 +134,9 @@ async fn serve(
             return std::process::ExitCode::FAILURE;
         }
     };
+    if let Err(e) = socket2::SockRef::from(&socket).set_tos_v4(pad_map::wire::TOS) {
+        tracing::warn!(error = %e, "cannot mark the answers expedited; sent unmarked");
+    }
     let port = socket.local_addr().map(|a| a.port()).unwrap_or(np.port);
     if let Some(tx) = bound {
         let _ = tx.send(port);
@@ -174,6 +177,7 @@ async fn serve(
         .ok();
     let (mut malformed, mut malformed_logged) = (0u64, None::<Instant>);
     let (mut late, mut late_logged) = (0u64, None::<Instant>);
+    let mut lateness = Lateness::default();
     let mut answers = Answers::default();
     let mut reserved_logged = false;
     // A client that was driving and went quiet: the robot sits after a second — `pad_map::loss`,
@@ -201,6 +205,20 @@ async fn serve(
                 while let Some((n, from)) = next {
                     let now = Instant::now();
                     let accept = rx.on_datagram(now, from, &buf[..n]);
+                    if let Some(ms) = rx.lateness()
+                        && let Some(s) = lateness.record(now, ms, accept == Accept::Late)
+                    {
+                        tracing::info!(
+                            %from,
+                            datagrams = s.datagrams,
+                            p50_ms = s.p50,
+                            p99_ms = s.p99,
+                            max_ms = s.max,
+                            late = s.late,
+                            "link: how late the pad's datagrams arrived, above the fastest, over the last {:?}",
+                            DROPPED_LOG
+                        );
+                    }
                     if let Some(status) = answers.on(accept, &buf[..n], malformed, now) {
                         // Best effort and never awaited: a full buffer or an unreachable client
                         // drops the answer, never delays the next datagram or ends the loop.
@@ -346,6 +364,49 @@ async fn serve(
     }
 }
 
+/// How late the driving stream's datagrams arrive, summed up once per [`DROPPED_LOG`] while they
+/// do: what the link is like — a spike now and then, a lag that never lets up, or stalls of seconds
+/// — before deciding what to do about it. Summed when the next datagram lands, so a stall is
+/// counted in the window it ends.
+#[derive(Default)]
+struct Lateness {
+    since: Option<Instant>,
+    ms: Vec<u32>,
+    late: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LatenessSummary {
+    datagrams: usize,
+    p50: u32,
+    p99: u32,
+    max: u32,
+    /// Of `datagrams`, the ones dropped as late.
+    late: u32,
+}
+
+impl Lateness {
+    fn record(&mut self, now: Instant, ms: u32, dropped: bool) -> Option<LatenessSummary> {
+        let since = *self.since.get_or_insert(now);
+        self.ms.push(ms);
+        self.late += u32::from(dropped);
+        if now.duration_since(since) < DROPPED_LOG {
+            return None;
+        }
+        self.ms.sort_unstable();
+        let at = |q: usize| self.ms[(self.ms.len() - 1) * q / 100];
+        let summary = LatenessSummary {
+            datagrams: self.ms.len(),
+            p50: at(50),
+            p99: at(99),
+            max: at(100),
+            late: self.late,
+        };
+        *self = Self::default();
+        Some(summary)
+    }
+}
+
 /// The answer to each datagram — `pad_map::wire::Status`, which `udp-pad.md` documents. Nothing
 /// for a malformed one: whatever sent it is not a pad client. A sender that is not the driving
 /// one hears "busy" at most every `BUSY_EVERY`: it learns why it is ignored without the robot
@@ -441,6 +502,30 @@ async fn sit_if_standing(robot: &mut robotd::Robotd) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lateness_is_summed_once_a_window() {
+        let (mut l, t) = (super::Lateness::default(), std::time::Instant::now());
+        for i in 0..100u32 {
+            let at = t + std::time::Duration::from_millis(u64::from(i) * 33);
+            assert_eq!(l.record(at, i % 10, false), None);
+        }
+        assert_eq!(
+            l.record(t + super::DROPPED_LOG, 900, true),
+            Some(super::LatenessSummary {
+                datagrams: 101,
+                p50: 5,
+                p99: 9,
+                max: 900,
+                late: 1
+            })
+        );
+        assert_eq!(
+            l.record(t + super::DROPPED_LOG, 3, false),
+            None,
+            "a new window"
+        );
+    }
+
     use super::*;
     use pad_map::wire::Packet;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

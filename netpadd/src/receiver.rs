@@ -67,6 +67,8 @@ pub struct Receiver {
     delivery: Delivery,
     /// The zero of the robot's side of [`Delivery`]'s offsets.
     epoch: Instant,
+    /// How late the last datagram was, when it was judged — see [`Receiver::lateness`].
+    lateness: Option<u32>,
     last_rx: Instant,
     last_tick: Option<Instant>,
     /// Something was accepted since the last tick.
@@ -86,6 +88,7 @@ impl Receiver {
             latest: Packet::default(),
             delivery: Delivery::default(),
             epoch: Instant::now(),
+            lateness: None,
             last_rx: Instant::now(),
             last_tick: None,
             fresh: false,
@@ -101,6 +104,7 @@ impl Receiver {
             Err(e) => return Accept::Malformed(e),
         };
         self.reserved_seen |= packet.reserved();
+        self.lateness = None;
         // Newer, in wrapping order, and not implausibly so, from whoever sent the last one.
         let ahead = packet.seq.wrapping_sub(self.latest.seq);
         let continues = self.stream == Some(from) && (1..=MAX_SEQ_AHEAD).contains(&ahead);
@@ -119,10 +123,11 @@ impl Receiver {
         }
         if packet.t_ms != 0 {
             let ours = now.duration_since(self.epoch).as_millis() as u32;
-            if !self
-                .delivery
-                .on_time(now, ours.wrapping_sub(packet.t_ms), self.timing.timeout)
-            {
+            let judged =
+                self.delivery
+                    .judge(now, ours.wrapping_sub(packet.t_ms), self.timing.timeout);
+            self.lateness = Some(judged.unwrap_or_else(|late| late));
+            if judged.is_err() {
                 return Accept::Late;
             }
         }
@@ -199,6 +204,13 @@ impl Receiver {
     pub fn reserved_bits_seen(&self) -> u16 {
         self.reserved_seen
     }
+
+    /// How late the datagram just handed to [`Receiver::on_datagram`] arrived, in ms above the
+    /// stream's fastest delivery — taken or dropped as [`Accept::Late`]. `None` when it was not
+    /// judged: not the driving stream, or no clock.
+    pub fn lateness(&self) -> Option<u32> {
+        self.lateness
+    }
 }
 
 /// How late a stream's datagrams arrive, without syncing clocks: `ours − t_ms` is the delivery
@@ -218,11 +230,11 @@ struct Delivery {
 }
 
 impl Delivery {
-    /// Whether a datagram with this offset is on time; learns from it when it is.
-    fn on_time(&mut self, now: Instant, offset: u32, limit: Duration) -> bool {
+    /// How late, in ms, a datagram with this offset is: `Ok` on time, and learnt from; `Err` late.
+    fn judge(&mut self, now: Instant, offset: u32, limit: Duration) -> Result<u32, u32> {
         let Some(fastest) = self.fastest else {
             self.fastest = Some(offset);
-            return true;
+            return Ok(0);
         };
         let late = offset.wrapping_sub(fastest) as i32;
         if late < 0 {
@@ -238,12 +250,12 @@ impl Delivery {
             };
             if now.duration_since(since) < LATE_FOR {
                 self.moved = Some((since, steady));
-                return false;
+                return Err(late as u32);
             }
             self.fastest = Some(steady);
         }
         self.moved = None;
-        true
+        Ok(late.max(0) as u32)
     }
 }
 

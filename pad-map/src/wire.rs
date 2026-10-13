@@ -16,6 +16,12 @@ pub const VERSION: u8 = 1;
 pub const LEN: usize = 28;
 pub const DEFAULT_PORT: u16 = 4210;
 
+/// The IP TOS byte both ends set on the pad socket: DSCP EF (46), expedited forwarding. An access
+/// point honouring WMM puts it in a high-priority queue (voice under RFC 8325, video under the
+/// older `dscp >> 3` mapping), ahead of bulk traffic and batched less. A network that ignores it
+/// loses nothing.
+pub const TOS: u32 = 46 << 2;
+
 const FULL: f64 = 32767.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
