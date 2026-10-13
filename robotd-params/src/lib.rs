@@ -207,7 +207,7 @@ impl Default for NetpadParams {
             enabled: false,
             port: 4210,
             max_hz: 30,
-            stale_ms: 200,
+            stale_ms: 300,
             timeout_ms: 1000,
         }
     }
@@ -3754,7 +3754,7 @@ mod tests {
         let n = NetpadParams::default();
         assert_eq!(
             (n.enabled, n.port, n.max_hz, n.stale_ms, n.timeout_ms),
-            (false, 4210, 30, 200, 1000)
+            (false, 4210, 30, 300, 1000)
         );
     }
 

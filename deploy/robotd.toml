@@ -599,5 +599,5 @@ mode = "walk"
 # enabled = false
 # port = 4210
 # max_hz = 30          # intent frames a second to robotd, at most, 10–100
-# stale_ms = 200       # nothing new this long stops the robot; below [safety] deadman_ms
+# stale_ms = 300       # nothing new this long stops the robot; below [safety] deadman_ms
 # timeout_ms = 1000    # silence that counts as the client gone; at least stale_ms

@@ -69,7 +69,7 @@ The other four keys are all read at start, so they too take a restart of both un
 | `enabled` | `false` | UDP is the pad source, and `padd` stands down |
 | `port` | `4210` | the UDP port, bound on IPv4 `0.0.0.0` |
 | `max_hz` | `30` | the most intent frames a second sent to the robot, 10 to 100; outside that is refused |
-| `stale_ms` | `200` | nothing new for this long and the robot stops where it stands, the client kept; also how late a datagram may arrive and still drive. It must be below `[safety] deadman_ms`, or the configuration is refused and the error names both keys |
+| `stale_ms` | `300` | nothing new for this long and the robot stops where it stands, the client kept; also how late a datagram may arrive and still drive. It must be below `[safety] deadman_ms`, or the configuration is refused and the error names both keys |
 | `timeout_ms` | `1000` | the silence after which the client counts as gone; at least `stale_ms`, or the configuration is refused |
 
 ## Driving from a laptop

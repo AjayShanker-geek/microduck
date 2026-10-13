@@ -670,7 +670,7 @@ mod tests {
         // Silence: past `stale_ms` the robot is stopped, once, and then no motion is sent at all
         // — not the last stick again, which would keep robotd's deadman fed. (What follows past
         // the timeout — the sound, then the sit — is `a_client_gone_sits_the_robot_after_a_second`.)
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let moves: Vec<_> = std::iter::from_fn(|| seen.try_recv().ok())
             .filter(|(m, _)| m == "robot.move")
             .map(|(_, p)| p)
@@ -919,7 +919,7 @@ mod tests {
     async fn a_stalled_client_keeps_its_session() {
         let (_dir, mut seen, serving, client) = start().await;
         let seq = hold(&client, 1, pad_map::Buttons::NONE, 100).await;
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let seq = hold(&client, seq, pad_map::Buttons::START, 100).await;
         hold(&client, seq, pad_map::Buttons::NONE, 200).await;
         let sent = drain(&mut seen);
