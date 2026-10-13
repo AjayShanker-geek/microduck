@@ -512,6 +512,13 @@ robotctl vetbook --json    # the book as robot.vetbook answers it
 `n` on the page writes a dated line in the diary — "reglued the beak", "new feet" — and Enter
 saves it on the robot.
 
+**`s` shares it.** On a robot signed in to Hugging Face (`robotctl account login`), `updaterd`
+publishes the book to a **public** dataset on that account, `<user>/<robot name>-vetbook`, and the
+page shows a link to its card on the `microduck-vetbook` Space, with a QR code to open it on a
+phone. The card is one of three, drawn at random each share; the Space's page has the buttons to
+post it, and a pasted link unfurls as the card. Diary notes stay on the robot. Renaming the duck
+shares to a new dataset; the old one stays. The Space's source is `spaces/vetbook/`.
+
 **Life**: hours awake, with torque, walking, standing, sitting, held in hands and on the floor —
 walking is the gait being asked to move, so velstand standing still counts as standing; metres
 walked (contact odometry, only while walking); falls, soft landings, pickups,
