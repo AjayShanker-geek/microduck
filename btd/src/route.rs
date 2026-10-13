@@ -613,10 +613,6 @@ mod tests {
                 // person approving the code is holding the phone that is bonded to the robot.
                 proto::method::ACCOUNT_LOGIN,
                 proto::method::ACCOUNT_LOGOUT,
-                // Sharing the vet book publishes under that account, so it rides the same claim:
-                // the phone bonded in the room, which is also where the share sheet that posts
-                // the card lives.
-                proto::method::VETBOOK_SHARE,
                 proto::method::NET_CONNECT,
                 proto::method::NET_FORGET,
                 proto::method::SYSTEM_SET_NAME,

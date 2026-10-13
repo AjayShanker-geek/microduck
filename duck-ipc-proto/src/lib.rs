@@ -1378,10 +1378,10 @@ impl Call {
                 // `account.status` is a read and stays ungated — a support engineer should be
                 // able to ask which account a robot thinks it belongs to.
                 | Call::AccountLogin(_)
-                | Call::AccountLogout
-                // Sharing publishes, in public and under the owner's name, something this robot
-                // knows about itself. Gated like signing in, since it acts as the account.
-                | Call::VetbookShare
+                | Call::AccountLogout // Not `vetbook.share`. It changes nothing on the robot, and it publishes under an
+                                      // account root already signed in — with a token the `robot` group can read, so
+                                      // this gate would protect nothing and only put `sudo` in front of a share button.
+                                      // Which transports may carry it is the route tables' decision, not this one.
         )
     }
 
@@ -6028,8 +6028,6 @@ mod tests {
                 // which account a robot thinks it belongs to is the first thing support asks.
                 method::ACCOUNT_LOGIN,
                 method::ACCOUNT_LOGOUT,
-                // Sharing publishes in public under the owner's name, acting as the account.
-                method::VETBOOK_SHARE,
                 method::NET_CONNECT,
                 method::NET_FORGET,
                 method::SYSTEM_SET_NAME,
