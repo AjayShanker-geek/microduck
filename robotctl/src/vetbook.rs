@@ -39,55 +39,54 @@ const LILAC: Color = Color::Indexed(141);
 const DIM: Color = Color::Indexed(244);
 const ALERT: Color = Color::Indexed(203);
 
-/// The patient card's height, borders included: the head's twenty-two pixels at two to a cell.
-const HEADER_HEIGHT: u16 = 13;
+/// The patient card's height, borders included: the head's twenty pixels at two to a cell.
+const HEADER_HEIGHT: u16 = 12;
 
-/// A microduck's head, three-quarter view, after the sticker: the cream shell over the back, the
-/// grey face on the front in its white rim, the camera eye in its orange ring with the slot beside
-/// it, the orange band under the head, and the beak hanging open from its hinge — an orange tray
-/// with the lavender pad in it. Ringed in white like the sticker. Drawn two pixels to a cell with
-/// half blocks, so the pixels come out square; `.` is the terminal's own background.
-const HEAD: [&str; 22] = [
-    "........SSSSSSSSSSSSSSSSSSSSSSSSS...",
-    ".....SSSSCCCCCCCCCCCCCCSSSSSSSSSSS..",
-    "....SSCCCCCCCCSGGGGGGGGGGGGGGGGGSS..",
-    "...SSCCCCCCCCSGGGGGGGGGGGGGGGGGGSSS.",
-    "..SSCCCCCCCCSGGGGGGG#OOOOGGGGGGGGSS.",
-    "..SCCCCCCCCCSGGGGGGOOOOOOOGGGGGGGGS.",
-    ".SSCCCCCCCCCGGGGGG#OoBBHHOOGGGGGGGS.",
-    ".SCCCCCCCCCSGGGGGGOOBBBHBOOGGBBBGGS.",
-    ".SCCRRCCCCCSGGGGGGOoBBBBBOOGGBBGGGS.",
-    ".SccRRCCCCCSGGGGGG#OoBBBoOOGGGGGGGS.",
-    ".SccRRRCCCCGGGGGGGG#OoooOOGGGGGGGGSS",
-    ".SccRRRCCCCGGGGGGGGG#OOO#gGGGGGGGGSS",
-    ".SccRRRCCCCRggggggggggggggggggggggSS",
-    ".SRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRS",
-    ".SSSSRR####################RRR#SSSSS",
-    "....SRR#RRRRRRRRRRRRRLLLLLLLLLR#SS..",
-    "....SRRRRLLLLLLLLLLLLLLLLLLLLLLR#SS.",
-    "....SSRRRLLLLLLLLLLLLLLLLLLLLLLRR#S.",
-    "....SSRRRRLLLLLLLLLRRRRRRRRRRRRRRRS.",
-    "....SRRRRRRRRRRRRRrrrrrrrrrrrrrrr#S.",
-    "....SSRrRRrrrrrrrrrrrrrrrrrrrrrrr#S.",
-    ".....SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS.",
+/// A microduck's head, three-quarter view, after the sticker: the cream shell over the back with
+/// the hinge on its side, the grey face, the camera eye in its orange ring with the slot beside
+/// it, the orange band under the head, and the beak hanging open — an orange tray with its
+/// lavender pad. Sampled from the sticker, snapped to these colours and finished by hand. Drawn
+/// two pixels to a cell with half blocks, so the pixels come out square; `.` is the terminal's
+/// own background.
+const HEAD: [&str; 20] = [
+    "......GGccccccggddddddd.....",
+    "....GcCCCCCCGgddgggggggdd...",
+    "...cCCCCCCCGddgggdddgggggd..",
+    "..GCCCCCCCGddggdbOOOodggggd.",
+    ".gcccCCCCcgdgggoOo#bRoggggd.",
+    ".ccccccccGdgggdOo#dgbOdgggd.",
+    "gccccccccgggggbOb##g#ob##ggd",
+    "GdbdcccccgggggbRb####Rb##ggd",
+    "gbr#ccccGdggggdoo###bOdggggd",
+    "gbbbGcccgdggggdbObbbOogggggd",
+    "gbrbccccgdgggggdboOOoggggggd",
+    "rbrbgcccggggggggddddddddddbb",
+    "rrRrroggdddddbbboorrRRRRRRRr",
+    "brRrrrrrrRRRRRRRrrrrrrbbdgd.",
+    "..rrbrrbbbbbbbbdddddddddd...",
+    "...rrrdddlllllLLLLLLLLLLld..",
+    "....rrdLLLLLLLLLLLLLLLLlLdb.",
+    ".....rrdllllllldddddbbbbbrro",
+    "......rrbbrrrrrRRRRRRRRRRRR.",
+    ".......rRRRRRRRRrrrooo......",
 ];
-const HEAD_WIDTH: u16 = 36;
+const HEAD_WIDTH: u16 = 28;
 
 fn head_colour(pixel: u8) -> Option<Color> {
     Some(match pixel {
-        b'S' => Color::Rgb(250, 250, 250),
-        b'#' => Color::Rgb(30, 24, 24),
-        b'C' => Color::Rgb(228, 218, 196),
-        b'c' => Color::Rgb(192, 180, 158),
-        b'G' => Color::Rgb(166, 166, 168),
-        b'g' => Color::Rgb(128, 128, 132),
-        b'O' => Color::Rgb(240, 150, 40),
-        b'o' => Color::Rgb(200, 110, 30),
-        b'R' => Color::Rgb(222, 90, 36),
-        b'r' => Color::Rgb(160, 60, 28),
-        b'L' => Color::Rgb(196, 176, 214),
-        b'B' => Color::Rgb(16, 16, 20),
-        b'H' => Color::Rgb(255, 255, 255),
+        b'#' => Color::Rgb(26, 22, 22),
+        b'C' => Color::Rgb(234, 227, 212),
+        b'c' => Color::Rgb(204, 196, 178),
+        b'G' => Color::Rgb(180, 180, 182),
+        b'g' => Color::Rgb(150, 150, 152),
+        b'd' => Color::Rgb(112, 112, 116),
+        b'O' => Color::Rgb(238, 142, 42),
+        b'o' => Color::Rgb(176, 96, 40),
+        b'R' => Color::Rgb(222, 94, 40),
+        b'r' => Color::Rgb(160, 62, 30),
+        b'b' => Color::Rgb(104, 44, 24),
+        b'L' => Color::Rgb(192, 176, 210),
+        b'l' => Color::Rgb(150, 134, 162),
         _ => return None,
     })
 }
