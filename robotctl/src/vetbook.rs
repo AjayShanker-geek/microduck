@@ -39,44 +39,55 @@ const LILAC: Color = Color::Indexed(141);
 const DIM: Color = Color::Indexed(244);
 const ALERT: Color = Color::Indexed(203);
 
-/// The patient card's height, borders included: seven lines, which is the head's fourteen
-/// pixels at two to a cell.
-const HEADER_HEIGHT: u16 = 9;
+/// The patient card's height, borders included: the head's twenty-two pixels at two to a cell.
+const HEADER_HEIGHT: u16 = 13;
 
-/// A microduck's head from the side, as pixels: the rounded grey back, the white face, the camera
-/// eye ringed in orange and bulging past the front, and the beak — an orange tray sticking out
-/// under the head, with its lavender pad. Drawn two pixels to a cell with half blocks, so the
-/// pixels come out square; `.` is the terminal's own background.
-const HEAD: [&str; 14] = [
-    ".......KKKKKKKKKKKKKKKKK......",
-    ".....KKwwWWWWWWWWWWWWWWWK.....",
-    "....KwWWWWWWWWWWWWWKKKKKK.....",
-    "...KgwWWWWWWWWWWWWKOOOOOK.....",
-    "..KggwWWWWWWWWWWWKOOLLLOOK....",
-    ".KGggwWWWWWWWWWWWKOLlLLLOK....",
-    ".KGggwWWWWWWWWWWWKOLLLLLOK....",
-    "KGGggwWWWWWWWWWWWKOOLLLOOK....",
-    "KGGggwWWWWWWWWWWWWKOOOOOK.....",
-    "KGGggwWWWWWWWWWWWWWKKKKKK.....",
-    "KGGggwWWWWWWWWWWWWWWWWWWK.....",
-    "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOK",
-    "OOPPPPPPPPPPPPPPPPPPPPPPPPOOOK",
-    ".oooooooooooooooooooooooooooo.",
+/// A microduck's head, three-quarter view, after the sticker: the cream shell over the back, the
+/// grey face on the front in its white rim, the camera eye in its orange ring with the slot beside
+/// it, the orange band under the head, and the beak hanging open from its hinge — an orange tray
+/// with the lavender pad in it. Ringed in white like the sticker. Drawn two pixels to a cell with
+/// half blocks, so the pixels come out square; `.` is the terminal's own background.
+const HEAD: [&str; 22] = [
+    "........SSSSSSSSSSSSSSSSSSSSSSSSS...",
+    ".....SSSSCCCCCCCCCCCCCCSSSSSSSSSSS..",
+    "....SSCCCCCCCCSGGGGGGGGGGGGGGGGGSS..",
+    "...SSCCCCCCCCSGGGGGGGGGGGGGGGGGGSSS.",
+    "..SSCCCCCCCCSGGGGGGG#OOOOGGGGGGGGSS.",
+    "..SCCCCCCCCCSGGGGGGOOOOOOOGGGGGGGGS.",
+    ".SSCCCCCCCCCGGGGGG#OoBBHHOOGGGGGGGS.",
+    ".SCCCCCCCCCSGGGGGGOOBBBHBOOGGBBBGGS.",
+    ".SCCRRCCCCCSGGGGGGOoBBBBBOOGGBBGGGS.",
+    ".SccRRCCCCCSGGGGGG#OoBBBoOOGGGGGGGS.",
+    ".SccRRRCCCCGGGGGGGG#OoooOOGGGGGGGGSS",
+    ".SccRRRCCCCGGGGGGGGG#OOO#gGGGGGGGGSS",
+    ".SccRRRCCCCRggggggggggggggggggggggSS",
+    ".SRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRS",
+    ".SSSSRR####################RRR#SSSSS",
+    "....SRR#RRRRRRRRRRRRRLLLLLLLLLR#SS..",
+    "....SRRRRLLLLLLLLLLLLLLLLLLLLLLR#SS.",
+    "....SSRRRLLLLLLLLLLLLLLLLLLLLLLRR#S.",
+    "....SSRRRRLLLLLLLLLRRRRRRRRRRRRRRRS.",
+    "....SRRRRRRRRRRRRRrrrrrrrrrrrrrrr#S.",
+    "....SSRrRRrrrrrrrrrrrrrrrrrrrrrrr#S.",
+    ".....SSSSSSSSSSSSSSSSSSSSSSSSSSSSSS.",
 ];
-const HEAD_WIDTH: u16 = 30;
+const HEAD_WIDTH: u16 = 36;
 
 fn head_colour(pixel: u8) -> Option<Color> {
     Some(match pixel {
-        b'K' => Color::Rgb(20, 20, 24),
-        b'W' => Color::Rgb(240, 240, 240),
-        b'w' => Color::Rgb(214, 214, 214),
-        b'g' => Color::Rgb(176, 176, 180),
-        b'G' => Color::Rgb(140, 140, 146),
-        b'O' => Color::Rgb(255, 135, 0),
-        b'o' => Color::Rgb(200, 90, 0),
-        b'L' => Color::Rgb(26, 30, 48),
-        b'l' => Color::Rgb(140, 210, 255),
-        b'P' => Color::Rgb(196, 168, 232),
+        b'S' => Color::Rgb(250, 250, 250),
+        b'#' => Color::Rgb(30, 24, 24),
+        b'C' => Color::Rgb(228, 218, 196),
+        b'c' => Color::Rgb(192, 180, 158),
+        b'G' => Color::Rgb(166, 166, 168),
+        b'g' => Color::Rgb(128, 128, 132),
+        b'O' => Color::Rgb(240, 150, 40),
+        b'o' => Color::Rgb(200, 110, 30),
+        b'R' => Color::Rgb(222, 90, 36),
+        b'r' => Color::Rgb(160, 60, 28),
+        b'L' => Color::Rgb(196, 176, 214),
+        b'B' => Color::Rgb(16, 16, 20),
+        b'H' => Color::Rgb(255, 255, 255),
         _ => return None,
     })
 }
@@ -470,6 +481,13 @@ impl Page {
             dim("vet says  "),
             Span::styled(verdict, Style::new().fg(colour).bold()),
         ]));
+        // Level with the middle of the head.
+        let pad = text.height.saturating_sub(lines.len() as u16) / 2;
+        let text = Rect {
+            y: text.y + pad,
+            height: text.height - pad,
+            ..text
+        };
         Paragraph::new(lines).render(text, buf);
     }
 
