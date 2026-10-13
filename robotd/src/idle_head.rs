@@ -118,12 +118,18 @@ impl IdleHead {
 
         if idle && self.started.is_none() {
             self.started = Some(now);
+            tracing::info!("idle look-around started");
         }
         let Some(started) = self.started else {
             return IdleOffset::default();
         };
         if self.gain == 0.0 {
             // Faded out: the next spell starts afresh, at the middle, wide awake.
+            let spell_s = now.duration_since(started).as_secs_f64();
+            tracing::info!(
+                spell_s = format_args!("{spell_s:.1}"),
+                "idle look-around stopped"
+            );
             self.started = None;
             self.look = None;
             self.glance = None;
