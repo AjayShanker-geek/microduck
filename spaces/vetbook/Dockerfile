@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Bookworm, pinned: Playwright's `--with-deps` knows Debian 12, and on the unpinned `-slim`, which
+# is Debian 13 now, it falls back to an Ubuntu 20.04 package list that names fonts trixie no
+# longer has (`ttf-unifont`, `ttf-ubuntu-font-family`) and the build stops there.
+FROM python:3.12-slim-bookworm
 
 # `git` because Hugging Face appends a `git config --global` layer to every Docker Space, and a
 # `-slim` base has none — that layer then fails with exit 127 after the image has built fine.
