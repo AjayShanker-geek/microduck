@@ -74,6 +74,14 @@ class Card:
     favourite: str | None
     favourite_count: int
     healthy: bool
+    spins: int = 0
+    songs: int = 0
+    naps: int = 0
+    carried: str = "0 s"
+    carried_s: float = 0.0
+    ground_picks: int = 0
+    soft_landings: int = 0
+    tricks_known: int = 0
     tripped: list[str] = field(default_factory=list)
     memo: str = ""
     energy: int = 1
@@ -146,6 +154,15 @@ def card_for(book: dict, user: str, duck: str, style: str | None = None) -> Card
         healthy=not tripped,
         tripped=tripped,
         memo=memo,
+        # Yaw turned while walking, either way, as whole turns.
+        spins=int(_num(life.get("turned_rad")) / (2 * 3.141592653589793)),
+        songs=int(_num(life.get("songs"))),
+        naps=int(_num(life.get("sit_downs"))),
+        carried=duration(_num(life.get("in_hands_s"))),
+        carried_s=_num(life.get("in_hands_s")),
+        ground_picks=int(_num(life.get("ground_picks"))),
+        soft_landings=int(_num(life.get("soft_landings"))),
+        tricks_known=len(skills),
         energy=stars(awake_h, (10, 50, 150, 400)),
         cuddliness=stars(cuddles + pets, (10, 50, 150, 400)),
         # Falls per hour of walking, so a duck that walks a lot is allowed to fall a lot — once it
