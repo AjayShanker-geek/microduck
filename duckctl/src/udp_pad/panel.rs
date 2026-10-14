@@ -65,12 +65,25 @@ pub struct Pad<'a> {
     pub packet: Packet,
 }
 
+/// Why there is no pad to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wait {
+    /// Too early to say there is none.
+    Searching,
+    /// No gamepad on this machine, or not the one `--pad` names.
+    Unplugged { pad: Option<usize> },
+    /// Pads here, none of them this duck's yet: the next press on one claims it.
+    Press,
+    /// Another `udp-pad` on this machine is claiming a pad; this one is next.
+    Queued,
+}
+
 /// Everything one frame shows.
 pub struct View<'a> {
     pub to: &'a str,
     pub pad: Option<Pad<'a>>,
-    /// No pad yet, and too early to say there is none.
-    pub searching: bool,
+    /// Why `pad` is `None`, when it is.
+    pub wait: Wait,
     pub hz: u32,
     /// Sends in the last second.
     pub rate: Option<u32>,
@@ -291,8 +304,13 @@ fn ms(d: Duration) -> String {
 
 fn pad_words(v: &View) -> String {
     match &v.pad {
-        None if v.searching => "looking for a gamepad…".to_owned(),
-        None => "no gamepad — plug one in".to_owned(),
+        None => match v.wait {
+            Wait::Searching => "looking for a gamepad…".to_owned(),
+            Wait::Unplugged { pad: None } => "no gamepad — plug one in".to_owned(),
+            Wait::Unplugged { pad: Some(n) } => format!("no gamepad {n} — plug it in"),
+            Wait::Press => "press a button on the pad for this duck".to_owned(),
+            Wait::Queued => "another udp-pad is claiming a pad — this one is next".to_owned(),
+        },
         Some(p) => match &p.power {
             Some(power) => format!("{} · {power}", p.name),
             None => p.name.to_owned(),
@@ -853,7 +871,7 @@ mod tests {
         View {
             to: "duck.local:4210",
             pad,
-            searching: false,
+            wait: Wait::Unplugged { pad: None },
             hz: 30,
             rate: Some(30),
             failed: 0,
@@ -989,5 +1007,14 @@ mod tests {
         let s = screen(&view(&link, None));
         assert!(s.contains("no gamepad — plug one in"), "{s}");
         assert!(summary(&view(&link, None)).starts_with("… connecting"));
+    }
+
+    #[test]
+    fn an_unclaimed_instance_asks_for_a_press() {
+        let link = Link::default();
+        let mut v = view(&link, None);
+        v.wait = Wait::Press;
+        let s = screen(&v);
+        assert!(s.contains("press a button on the pad for this duck"), "{s}");
     }
 }

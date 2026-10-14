@@ -80,6 +80,9 @@ serde_json.workspace = true
 socket2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 # libdbus compiled in rather than linked, so the Linux binary needs nothing from the machine but
 # the D-Bus daemon BlueZ already runs. That is what lets one wheel serve every distribution
 # (`uvx duckctl`, see `pyproject.toml`): a dynamically linked libdbus is outside the manylinux

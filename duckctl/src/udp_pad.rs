@@ -5,21 +5,26 @@
 //! when nothing does, and shows what it sends and what `netpadd` answers (`panel.rs`). No pad,
 //! nothing sent — the robot times the client out and its deadman holds it, exactly as when a
 //! Bluetooth pad goes away.
+//!
+//! Which pad is the one sent is `--pad N`, or else the first pad a button is pressed on, so that
+//! several instances on one laptop each drive their own duck with their own pad (`claim.rs`).
 
 use std::hash::{BuildHasher, Hasher};
 use std::net::UdpSocket;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use gilrs::{Axis, Button, GamepadId, Gilrs, PowerInfo};
+use gilrs::{Axis, Button, EventType, GamepadId, Gilrs, PowerInfo};
 use pad_map::Buttons;
 use pad_map::wire::{DEFAULT_PORT, Packet, RobotReport, Status};
 
+mod claim;
 mod link;
 mod panel;
 
+use claim::Claims;
 use link::{Link, State};
-use panel::{REDRAW, SUMMARY, Screen, View};
+use panel::{REDRAW, SUMMARY, Screen, View, Wait};
 
 /// When to send: a change and a keepalive are both capped at the interval. What a change buys
 /// is that the loop wakes for it at once rather than at the next keepalive (see `run`).
@@ -62,8 +67,8 @@ const RECOVERED: Duration = Duration::from_secs(2);
 /// line per failed send scrolls the reason away before anyone reads it.
 #[derive(Default)]
 pub struct Notices {
-    /// Whether a pad was there when last looked, `None` before the first look.
-    pad: Option<bool>,
+    /// Whether a pad was there when last looked, or why not; `None` before the first look.
+    pad: Option<Result<(), Wait>>,
     /// The failure last reported, until sends have been clean for [`RECOVERED`].
     failing: Option<std::io::ErrorKind>,
     last_failure: Option<Instant>,
@@ -76,21 +81,38 @@ pub struct Notices {
 }
 
 impl Notices {
-    /// The pad on this machine, by name when there is one.
-    pub fn pad(&mut self, name: Option<&str>) -> Option<String> {
-        let (was, now) = (self.pad, name.is_some());
-        self.pad = Some(now);
-        match (was, name) {
-            (Some(w), _) if w == now => None,
-            (_, Some(name)) => Some(format!("gamepad: {name} — sending its state")),
-            (None, None) => Some(
-                "no gamepad on this machine — sending nothing until one is plugged in".to_owned(),
-            ),
-            (Some(_), None) => Some(
-                "gamepad gone — sending nothing; the duck stops once its deadman runs out"
-                    .to_owned(),
-            ),
+    /// The pad this instance sends, by name when there is one, or why there is none.
+    pub fn pad(&mut self, pad: Result<&str, Wait>) -> Option<String> {
+        let now = pad.map(|_| ());
+        let was = self.pad.replace(now);
+        if was == Some(now) {
+            return None;
         }
+        let gone = was == Some(Ok(()));
+        let line = match pad {
+            Ok(name) => format!("gamepad: {name} — sending its state"),
+            Err(Wait::Searching) => return None,
+            Err(Wait::Unplugged { .. }) if gone => {
+                "gamepad gone — sending nothing; the duck stops once its deadman runs out"
+                    .to_owned()
+            }
+            Err(Wait::Unplugged { pad: None }) => {
+                "no gamepad on this machine — sending nothing until one is plugged in".to_owned()
+            }
+            Err(Wait::Unplugged { pad: Some(n) }) => {
+                format!("no gamepad {n} on this machine — sending nothing until it is plugged in")
+            }
+            Err(Wait::Press) if gone => {
+                "gamepad gone — sending nothing; press a button on a pad to drive this duck again"
+                    .to_owned()
+            }
+            Err(Wait::Press) => "press a button on the pad for this duck".to_owned(),
+            Err(Wait::Queued) => {
+                "another udp-pad is claiming a pad — press on that one first, this one is next"
+                    .to_owned()
+            }
+        };
+        Some(line)
     }
 
     /// One send's result.
@@ -178,6 +200,20 @@ impl Notices {
         let (verdict, why) = panel::verdict(to, state)?;
         Some(format!("{} — {why}", verdict.word()))
     }
+}
+
+/// Which pad this instance sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    /// The Nth pad this machine has, from 1, in the order gilrs found them.
+    Nth(usize),
+    /// The first pad a button is pressed on, skipping the ones other instances drive.
+    Press,
+}
+
+/// `--pad`, given or not.
+pub fn pick(pad: Option<u64>) -> Pick {
+    pad.map_or(Pick::Press, |n| Pick::Nth(n as usize))
 }
 
 fn target(host: &str) -> String {
@@ -285,8 +321,18 @@ fn power(info: PowerInfo) -> Option<String> {
     }
 }
 
-pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    host: &str,
+    hz: u32,
+    invert_y: bool,
+    pick: Pick,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut gilrs = Gilrs::new().map_err(|e| format!("no gamepad subsystem: {e}"))?;
+    let mut claims =
+        Claims::open().map_err(|e| format!("cannot share pads on this machine: {e}"))?;
+    // The pad a press claimed, and a press waiting out `claim::SETTLE` before it is taken.
+    let mut claimed = None::<GamepadId>;
+    let mut press = None::<(GamepadId, SystemTime, Instant)>;
     let to = target(host);
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     // Best effort: Windows may refuse it, and the datagrams go unmarked, as they did before.
@@ -311,17 +357,58 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
         Some(s) => s.notice(&line),
         None => eprintln!("{line}"),
     };
+    let which = match pick {
+        Pick::Nth(n) => format!("gamepad {n}"),
+        Pick::Press => "the pad a button is pressed on".to_owned(),
+    };
     say(
         &mut screen,
-        format!("sending the first pad on this machine to {to}, at most {hz} Hz — Ctrl-C to stop"),
+        format!("sending {which} to {to}, at most {hz} Hz — Ctrl-C to stop"),
     );
 
     loop {
         if screen.as_mut().is_some_and(Screen::quit) {
             return Ok(());
         }
+        // Only the instance whose turn it is takes a press, so one press is never claimed twice.
+        let claiming = pick == Pick::Press && claimed.is_none() && claims.turn()?;
+        let mine = match pick {
+            Pick::Nth(n) => gilrs.gamepads().nth(n - 1).map(|(id, _)| id),
+            Pick::Press => claimed,
+        };
         while let Some(ev) = gilrs.next_event() {
             last_input = Some((ev.id, Instant::now()));
+            if let EventType::ButtonPressed(..) = ev.event {
+                if Some(ev.id) == mine {
+                    // Best effort: unwritten, another instance could claim this pad too.
+                    let _ = claims.pressed(ev.time, &to);
+                } else if claiming && press.is_none() {
+                    press = Some((ev.id, ev.time, Instant::now()));
+                }
+            }
+        }
+        if let Some(id) = claimed
+            && gilrs.connected_gamepad(id).is_none()
+        {
+            claimed = None;
+        }
+        // A press is taken once the instance driving that pad, if any, has had time to say so.
+        if let Some((id, at, seen)) = press
+            && seen.elapsed() >= claim::SETTLE
+        {
+            press = None;
+            match claims.taken(at) {
+                Some(other) => say(
+                    &mut screen,
+                    format!("that pad drives {other} already — press a button on another"),
+                ),
+                None if gilrs.connected_gamepad(id).is_some() => {
+                    claimed = Some(id);
+                    claims.done();
+                    let _ = claims.pressed(at, &to);
+                }
+                None => {}
+            }
         }
         while let Ok(heard) = answers.try_recv() {
             match heard {
@@ -342,14 +429,23 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
                 }
             }
         }
-        let pad = gilrs.gamepads().next();
+        let pad = match pick {
+            Pick::Nth(n) => gilrs.gamepads().nth(n - 1),
+            Pick::Press => claimed.and_then(|id| gilrs.connected_gamepad(id).map(|p| (id, p))),
+        };
         let now = Instant::now();
         // gilrs on macOS finds a pad already plugged in through an event a moment after start:
         // "no gamepad" before then would be wrong, and said only to be taken back.
         let settled = now.duration_since(started) >= PAD_SETTLE;
-        if (pad.is_some() || settled)
-            && let Some(line) = notices.pad(pad.as_ref().map(|(_, p)| p.name()))
-        {
+        // Asked only without a pad: the turn is a lock, and a driving instance must not take it.
+        let wait = match pick {
+            _ if pad.is_some() || !settled => Wait::Searching,
+            Pick::Nth(n) => Wait::Unplugged { pad: Some(n) },
+            Pick::Press if gilrs.gamepads().next().is_none() => Wait::Unplugged { pad: None },
+            Pick::Press if claims.turn()? => Wait::Press,
+            Pick::Press => Wait::Queued,
+        };
+        if let Some(line) = notices.pad(pad.as_ref().map(|(_, p)| p.name()).ok_or(wait)) {
             say(&mut screen, line);
         }
         if let Some(line) = notices.link(&to, link.state(now)) {
@@ -422,7 +518,7 @@ pub fn run(host: &str, hz: u32, invert_y: bool) -> Result<(), Box<dyn std::error
             shown = Some(now);
             let view = View {
                 to: &to,
-                searching: !settled,
+                wait,
                 pad: pad.as_ref().map(|(id, p)| panel::Pad {
                     name: p.name(),
                     power: power(p.power_info()),
@@ -518,16 +614,38 @@ mod tests {
     /// The pad on this machine: said when it is first looked for, and on every change after.
     #[test]
     fn the_pad_is_said_once_per_change() {
+        let none = Err(Wait::Unplugged { pad: None });
         let mut n = Notices::default();
-        assert!(n.pad(None).is_some_and(|m| m.contains("no gamepad")));
-        assert_eq!(n.pad(None), None);
+        assert_eq!(n.pad(Err(Wait::Searching)), None);
+        assert!(n.pad(none).is_some_and(|m| m.contains("no gamepad")));
+        assert_eq!(n.pad(none), None);
         assert!(
-            n.pad(Some("Xbox Controller"))
+            n.pad(Ok("Xbox Controller"))
                 .is_some_and(|m| m.contains("Xbox Controller"))
         );
-        assert_eq!(n.pad(Some("Xbox Controller")), None);
-        assert!(n.pad(None).is_some_and(|m| m.contains("gone")));
-        assert_eq!(n.pad(None), None);
+        assert_eq!(n.pad(Ok("Xbox Controller")), None);
+        assert!(n.pad(none).is_some_and(|m| m.contains("gone")));
+        assert_eq!(n.pad(none), None);
+    }
+
+    /// Claiming: asked for once, and asked again when the claimed pad goes.
+    #[test]
+    fn a_claim_is_asked_for_once_and_again_when_the_pad_goes() {
+        let mut n = Notices::default();
+        assert!(
+            n.pad(Err(Wait::Queued))
+                .is_some_and(|m| m.contains("another udp-pad"))
+        );
+        assert!(
+            n.pad(Err(Wait::Press))
+                .is_some_and(|m| m.starts_with("press a button"))
+        );
+        assert_eq!(n.pad(Err(Wait::Press)), None);
+        assert!(n.pad(Ok("Xbox Controller")).is_some());
+        assert!(
+            n.pad(Err(Wait::Press))
+                .is_some_and(|m| m.contains("gone") && m.contains("press a button"))
+        );
     }
 
     /// The duck's answers: said when they start, change kind, or stop — not as a silence grows.
