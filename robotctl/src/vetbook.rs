@@ -1043,7 +1043,7 @@ impl Page {
                             t(key::REMOTE_VISITS)
                         ),
                     ),
-                    ("laser sweep", format!("{:.0} m²", t(key::LASER_M2))),
+                    ("new surface seen", format!("{:.1} m²", t(key::SURFACE_M2))),
                     (
                         "nearest · farthest",
                         format!(

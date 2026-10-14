@@ -167,9 +167,14 @@ pub mod key {
     pub const REMOTE_VISITS: &str = "remote_visits";
 
     // ── tofd ──
-    /// Surface the depth sensor's beams have swept: each valid zone's footprint at its distance,
-    /// summed over frames. A tally.
-    pub const LASER_M2: &str = "laser_m2";
+    /// New surface the depth sensor has seen, a tally: a zone adds its footprint at its distance
+    /// (distance² × the zone's solid angle) only when that distance has moved past sensor noise —
+    /// more than 10 cm or 15 % — since the zone last counted. A duck staring at a wall adds
+    /// nothing; turning its head or walking somewhere adds what comes into view.
+    ///
+    /// Replaces `laser_m2`, which summed every frame at 15 Hz and grew by about 37 m² a second
+    /// standing still; books keep that number, and nothing reads it.
+    pub const SURFACE_M2: &str = "surface_m2";
     /// Depth frames read. A tally.
     pub const TOF_FRAMES: &str = "tof_frames";
     /// The nearest thing ever seen, a low; and the farthest, a high.

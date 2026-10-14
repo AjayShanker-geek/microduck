@@ -1055,17 +1055,18 @@ const ZONE_RAD: f64 = (45.0 / 8.0) * std::f64::consts::PI / 180.0;
 /// cost is one small copy per frame and a few dozen multiply-adds. Nothing here asks for frames: a
 /// duck whose sensor is not streaming reports nothing.
 ///
-/// The swept area is each valid zone's footprint at its distance (distance² × the zone's solid
-/// angle), summed over frames — how much the laser has looked at, not how much ground the duck has
-/// covered: a duck staring at one wall sweeps it again every frame. Unique area would need a map.
+/// New surface is counted per zone against the distance that zone last counted at — see
+/// `vetbook::key::SURFACE_M2`. A frame the same as the last adds nothing, which is what most frames
+/// of a duck standing still are; it is not a map, so coming back to a wall counts it again.
 async fn vetbook_tally(mut frames: tokio::sync::broadcast::Receiver<proto::TofFrame>) {
     use proto::vetbook::{VetbookTallyParams, merge_maps};
     let socket = PathBuf::from(proto::socket::ROBOT);
     let mut pending = VetbookTallyParams::default();
+    let mut counted = Counted::default();
     let mut reported = Instant::now();
     loop {
         match frames.recv().await {
-            Ok(frame) => tally_frame(frame, &mut pending),
+            Ok(frame) => tally_frame(frame, &mut counted, &mut pending),
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
@@ -1088,7 +1089,25 @@ async fn vetbook_tally(mut frames: tokio::sync::broadcast::Receiver<proto::TofFr
     }
 }
 
-fn tally_frame(frame: proto::TofFrame, pending: &mut proto::vetbook::VetbookTallyParams) {
+/// The distance each zone last counted new surface at, metres; zero where it never has.
+struct Counted([f64; tof::ZONES]);
+
+impl Default for Counted {
+    fn default() -> Self {
+        Self([0.0; tof::ZONES])
+    }
+}
+
+/// A zone's distance has moved past sensor noise: more than 10 cm, or 15 % of the distance.
+fn moved(was: f64, now: f64) -> bool {
+    was == 0.0 || (now - was).abs() > (0.10f64).max(0.15 * was)
+}
+
+fn tally_frame(
+    frame: proto::TofFrame,
+    counted: &mut Counted,
+    pending: &mut proto::vetbook::VetbookTallyParams,
+) {
     use proto::vetbook::key;
     let frame = tof::Frame {
         rows: frame.rows,
@@ -1097,10 +1116,15 @@ fn tally_frame(frame: proto::TofFrame, pending: &mut proto::vetbook::VetbookTall
         status: frame.status,
     };
     let (mut area, mut closest, mut farthest) = (0.0f64, f64::INFINITY, 0.0f64);
-    for zone in frame.zones() {
+    for (i, zone) in frame.zones().enumerate() {
         if let tof::Zone::Range(metres) = zone {
             let d = f64::from(metres);
-            area += d * d * ZONE_RAD * ZONE_RAD;
+            if let Some(last) = counted.0.get_mut(i)
+                && moved(*last, d)
+            {
+                area += d * d * ZONE_RAD * ZONE_RAD;
+                *last = d;
+            }
             // Whole millimetres, the sensor's own resolution; the f32 metres in between add noise.
             let mm = (d * 1000.0).round();
             closest = closest.min(mm);
@@ -1112,7 +1136,10 @@ fn tally_frame(frame: proto::TofFrame, pending: &mut proto::vetbook::VetbookTall
         .entry(key::TOF_FRAMES.to_owned())
         .or_default() += 1.0;
     if area > 0.0 {
-        *pending.tallies.entry(key::LASER_M2.to_owned()).or_default() += area;
+        *pending
+            .tallies
+            .entry(key::SURFACE_M2.to_owned())
+            .or_default() += area;
         let low = pending
             .lows
             .entry(key::CLOSEST_MM.to_owned())
@@ -1129,30 +1156,46 @@ fn tally_frame(frame: proto::TofFrame, pending: &mut proto::vetbook::VetbookTall
 #[cfg(test)]
 mod vetbook_tests {
     use super::*;
+    use proto::vetbook::{VetbookTallyParams, key};
+
+    fn frame(distance_mm: i16) -> proto::TofFrame {
+        proto::TofFrame {
+            rows: 8,
+            cols: 8,
+            distance_mm: vec![distance_mm; tof::ZONES],
+            status: vec![5u8; tof::ZONES],
+            ..Default::default()
+        }
+    }
 
     #[test]
-    fn a_frame_adds_its_sweep_and_its_extremes() {
-        let mut pending = proto::vetbook::VetbookTallyParams::default();
-        let mut distance_mm = vec![1000i16; tof::ZONES];
-        distance_mm[0] = 120;
-        let mut status = vec![5u8; tof::ZONES];
-        status[1] = 255; // not a range
-        tally_frame(
-            proto::TofFrame {
-                rows: 8,
-                cols: 8,
-                distance_mm,
-                status,
-                ..Default::default()
-            },
-            &mut pending,
-        );
-        use proto::vetbook::key;
+    fn a_frame_adds_its_extremes_and_its_new_surface() {
+        let (mut counted, mut pending) = (Counted::default(), VetbookTallyParams::default());
+        let mut f = frame(1000);
+        f.distance_mm[0] = 120;
+        f.status[1] = 255; // not a range
+        tally_frame(f, &mut counted, &mut pending);
         assert_eq!(pending.tallies[key::TOF_FRAMES], 1.0);
         assert_eq!(pending.lows[key::CLOSEST_MM], 120.0);
         assert_eq!(pending.highs[key::FARTHEST_MM], 1000.0);
         // 62 zones at 1 m and one at 12 cm, each (45°/8)² sr.
         let expected = (62.0 + 0.12 * 0.12) * ZONE_RAD * ZONE_RAD;
-        assert!((pending.tallies[key::LASER_M2] - expected).abs() < 1e-9);
+        assert!((pending.tallies[key::SURFACE_M2] - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn staring_at_a_wall_adds_no_surface() {
+        let (mut counted, mut pending) = (Counted::default(), VetbookTallyParams::default());
+        tally_frame(frame(2000), &mut counted, &mut pending);
+        let first = pending.tallies[key::SURFACE_M2];
+        // A minute at 15 Hz, with the sensor's own few-centimetre jitter.
+        for i in 0..900 {
+            tally_frame(frame(2000 + (i % 7) * 10 - 30), &mut counted, &mut pending);
+        }
+        assert_eq!(pending.tallies[key::SURFACE_M2], first);
+        assert_eq!(pending.tallies[key::TOF_FRAMES], 901.0);
+        // Turning to a wall half as far away is new surface.
+        tally_frame(frame(1000), &mut counted, &mut pending);
+        assert!(pending.tallies[key::SURFACE_M2] > first);
     }
 }
