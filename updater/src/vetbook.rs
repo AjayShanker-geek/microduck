@@ -46,8 +46,8 @@ pub const SPACE_URL: &str = "https://pollen-robotics-microduck-vetbook.hf.space"
 
 /// The cards a share can draw, as the Space names them. The Space draws any of its own for a name
 /// it does not know, so an older robot drawing from a shorter list still gets a card.
-pub const CARDS: [&str; 7] = [
-    "notebook", "purikura", "profile", "receipt", "passport", "gameboy", "polaroid",
+pub const CARDS: [&str; 8] = [
+    "notebook", "purikura", "profile", "receipt", "passport", "gameboy", "polaroid", "fifa",
 ];
 
 /// How long `robotd` and `configd` each get to answer. Both answer from memory.

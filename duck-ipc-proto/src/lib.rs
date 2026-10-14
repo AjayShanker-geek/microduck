@@ -2873,7 +2873,7 @@ pub struct VetbookShareResult {
     /// The dataset the book was published to, `<user>/<robot name>-vetbook`.
     pub dataset: String,
     /// Which of the cards this share drew, as the Space names it: `notebook`, `purikura`,
-    /// `profile`, `receipt`, `passport`, `gameboy` or `polaroid`.
+    /// `profile`, `receipt`, `passport`, `gameboy`, `polaroid` or `fifa`.
     pub card: String,
 }
 

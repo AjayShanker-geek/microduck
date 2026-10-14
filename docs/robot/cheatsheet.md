@@ -512,7 +512,7 @@ robotctl vetbook --json    # the book as robot.vetbook answers it
 **★ Records** holds a personal best from every sensor: fastest spin and steepest tilt survived
 (body IMU), top speed and longest walk without a fall (odometry), peak current and fastest joint
 (servos), sounds, beak flaps and flashlight time, photos and video streamed (`mediad`), the laser's
-swept area and the nearest and farthest things seen (`tofd`), and the longest stretch on one
+new surface seen and the nearest and farthest things (`tofd`), and the longest stretch on one
 charge. `mediad` and `tofd` report theirs to `robotd` once a minute (`robot.vetbookTally`).
 
 `n` on the page writes a dated line in the diary — "reglued the beak", "new feet" — and Enter
@@ -521,7 +521,7 @@ saves it on the robot.
 **`s` shares it.** On a robot signed in to Hugging Face (`robotctl account login`), `updaterd`
 publishes the book to a **public** dataset on that account, `<user>/<robot name>-vetbook`, and the
 page shows a link to its card on the `microduck-vetbook` Space, with a QR code to open it on a
-phone. The card is one of seven designs, drawn at random each share, in a palette the duck's name
+phone. The card is one of eight designs, drawn at random each share, in a palette the duck's name
 picks, with a seasonal skin around Halloween, in December and for Valentine's; it carries the
 duck's mood (from "Feeling great!" to "Vet time!"), its rarest badges and its most remarkable fun
 facts. A 1080 × 1920 story for Instagram and TikTok sits beside it; the Space's page has the buttons to

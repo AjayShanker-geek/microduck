@@ -121,7 +121,7 @@ def badges(s: Stats) -> list[Badge]:
         ("night_owl", "☾", "Night owl", 2, "#6a5490", num(t.get("flashlight_s")) >= 3600),
         ("paparazzi", "◉", "Paparazzi", 2, "#ff7eb0", num(t.get("photos")) >= 100),
         ("influencer", "✧", "Influencer", 3, "#9b7bff", num(t.get("video_s")) >= 36_000 or num(t.get("remote_visits")) >= 50),
-        ("explorer", "⌖", "Explorer", 2, "#2f9a8a", num(t.get("laser_m2")) >= 10_000),
+        ("explorer", "⌖", "Explorer", 2, "#2f9a8a", num(t.get("surface_m2")) >= 500),
         ("nosy", "◎", "Nosy", 1, "#ffa94d", 0 < num(lo.get("closest_mm")) <= 30),
         ("upside_down", "⇅", "Upside-down champ", 2, "#8e6ad8", num(t.get("upside_down_s")) >= 600),
         ("speed", "⚡", "Speed demon", 3, "#ffbf3d", num(hi.get("top_speed_mps")) >= 0.4),
@@ -175,8 +175,8 @@ def facts(s: Stats) -> list[str]:
         out.append((4, f"spent {num(s.t['upside_down_s']) / 60:.0f} minutes upside down"))
     if num(s.t.get("photos")) >= 10:
         out.append((4, f"took {num(s.t['photos']):.0f} photos"))
-    if num(s.t.get("laser_m2")) >= 100:
-        out.append((5, f"its laser has looked at {num(s.t['laser_m2']):,.0f} m²"))
+    if num(s.t.get("surface_m2")) >= 20:
+        out.append((5, f"its laser has scanned {num(s.t['surface_m2']):,.0f} m² of new surfaces"))
     if 0 < num(s.lo.get("closest_mm")) <= 50:
         out.append((3, f"once put its beak {num(s.lo['closest_mm']):.0f} mm from something"))
     if num(s.t.get("flashlight_s")) >= 600:
@@ -251,3 +251,46 @@ def season(when: int, override: str | None = None) -> str | None:
     if d.month == 2 and 7 <= d.day <= 15:
         return "valentine"
     return None
+
+
+# ── a football card ──────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Fut:
+    overall: int
+    position: str
+    tier: str  # bronze, silver, gold, icon
+    attributes: tuple  # six (code, value), in the card's two columns
+
+
+def rating(value: float, scale: float) -> int:
+    """40 for nothing, approaching 99: `scale` is the value that earns about 77."""
+    return min(99, round(40 + 59 * (1 - math.exp(-max(0.0, value) / scale))))
+
+
+POSITIONS = {
+    "an adventurer": "ADV",
+    "a people duck": "CUD",
+    "a philosopher": "PHI",
+    "a napper": "NAP",
+    "a performer": "SHO",
+    "a mystery": "???",
+}
+
+
+def fut(s: Stats) -> Fut:
+    """Six attributes from the book, 40 to 99, and an overall from them."""
+    skills_used = sum(int(num(v)) for v in s.skills.values())
+    balance = (rating(num(s.hi.get("walk_streak_m")), 80) + rating(num(s.hi.get("tilt_survived_deg")), 20)) / 2
+    attrs = (
+        ("SPD", rating(num(s.hi.get("top_speed_mps")), 0.25)),
+        ("WLK", rating(s.distance_m, 5000)),
+        ("HUG", rating(s.pickups + s.pets, 150)),
+        ("BAL", round(balance)),
+        ("TRK", rating(skills_used, 60)),
+        ("STA", rating(s.awake_h, 100)),
+    )
+    overall = round(sum(v for _, v in attrs) / len(attrs))
+    tier = "icon" if s.awake_h >= 500 and overall >= 80 else "gold" if overall >= 75 else "silver" if overall >= 65 else "bronze"
+    return Fut(overall, POSITIONS.get(personality(s), "DCK"), tier, attrs)

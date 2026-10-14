@@ -16,7 +16,10 @@ import traits
 
 # The landscape cards a share can draw, 1200 × 630. The story, 1080 × 1920, is offered beside
 # whichever was drawn rather than drawn itself: it is a different shape for a different place.
-CARDS = ("notebook", "purikura", "profile", "receipt", "passport", "gameboy", "polaroid")
+CARDS = ("notebook", "purikura", "profile", "receipt", "passport", "gameboy", "polaroid", "fifa")
+
+# Designs being tried out: drawn only when asked for by name (`?card=`), never by a share.
+PROTOTYPES: tuple[str, ...] = ()
 
 # How many palettes each card has, for `traits.palette`.
 PALETTES = 4
@@ -89,6 +92,7 @@ class Card:
     ground_picks: int = 0
     soft_landings: int = 0
     tricks_known: int = 0
+    fut: traits.Fut | None = None
     status: traits.Status | None = None
     badges: list = field(default_factory=list)
     facts: list = field(default_factory=list)
@@ -116,8 +120,8 @@ def card_for(
     robot = share.get("robot") or duck
     owner = share.get("owner") or user
 
-    chosen = style if style in CARDS else share.get("card")
-    if chosen not in CARDS:
+    chosen = style if style in CARDS + PROTOTYPES else share.get("card")
+    if chosen not in CARDS + PROTOTYPES:
         chosen = CARDS[int(hashlib.sha1(f"{user}/{duck}".encode()).hexdigest(), 16) % len(CARDS)]
 
     skills = {k: int(_num(v)) for k, v in (life.get("skills") or {}).items()}
@@ -217,6 +221,7 @@ def card_for(
         tricks_known=len(skills),
         status=status,
         badges=traits.badges(stats),
+        fut=traits.fut(stats),
         facts=traits.facts(stats),
         personality=traits.personality(stats),
         sign=traits.star_sign(opened),
@@ -228,7 +233,7 @@ def card_for(
             "spin_tps": _num((life.get("highs") or {}).get("spin_dps")) / 360,
             "tilt_deg": _num((life.get("highs") or {}).get("tilt_survived_deg")),
             "photos": _num((life.get("tallies") or {}).get("photos")),
-            "laser_m2": _num((life.get("tallies") or {}).get("laser_m2")),
+            "surface_m2": _num((life.get("tallies") or {}).get("surface_m2")),
             "flashlight_h": _num((life.get("tallies") or {}).get("flashlight_s")) / 3600,
             "sounds": _num((life.get("tallies") or {}).get("sounds")),
         },
