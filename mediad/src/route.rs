@@ -211,6 +211,8 @@ fn permits(call: &proto::Call) -> bool {
         // authorisation on this transport — would let any LAN peer do that. The phone over BLE
         // and `robotctl` on the robot are where a share comes from.
         VetbookShare => false,
+        // Daemon-to-daemon plumbing, like the chorale's: not a client surface.
+        RobotVetbookTally(_) => false,
 
         // ── the streams BLE pointed here ────────────────────────────────────
         //

@@ -822,6 +822,7 @@ impl Server {
             | Call::RobotModel
             | Call::RobotVetbook
             | Call::RobotVetbookNote(_)
+            | Call::RobotVetbookTally(_)
             | Call::RobotLoadPolicy(_)
             | Call::RobotReloadPolicies
             | Call::RobotSubscribe(_) => Response::err(

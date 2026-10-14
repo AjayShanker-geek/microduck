@@ -18,8 +18,14 @@ servo it has been through. On the robot, `robotctl vetbook` shows it, and `s` sh
 
 - `/d/<user>/<duck>`: the page to share, with buttons to post it. Its preview image is the card,
   so a pasted link unfurls as the card.
-- `/d/<user>/<duck>/card.png`: the card, 1200 × 630. Each share draws one of three at random;
-  `?card=notebook|purikura|profile` picks one.
+- `/d/<user>/<duck>/card.png`: the card, 1200 × 630. Each share draws one of eight at random;
+  `?card=notebook|purikura|profile|receipt|passport|gameboy|polaroid|fifa` picks one, and
+  `?season=halloween|winter|valentine|none` previews a seasonal skin.
+- `/d/<user>/<duck>/story.png`: the same duck as a 1080 × 1920 story, for Instagram and TikTok.
+
+What a card says — the mood, the badges, the fun facts, the personality and star sign, the palette
+and the season — is `traits.py`, arithmetic on the book; `python test_traits.py` checks it. Each
+design is a `card_<name>.html` extending `card.html`.
 
 The source lives in the microduck repository under `spaces/vetbook/`, next to the code that
 publishes the book (`updater/src/vetbook.rs`), and is deployed with `scripts/publish-space.sh vetbook`.

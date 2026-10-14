@@ -422,6 +422,8 @@ fn permits(call: &proto::Call) -> bool {
         // the card is on the phone. PIN-bonded and in the room, like the login it depends on, and
         // the reply is a link and a dataset name — a few hundred bytes.
         VetbookShare => true,
+        // Daemon-to-daemon: how `mediad` and `tofd` report to the book. Nothing a phone sends.
+        RobotVetbookTally(_) => false,
 
         // **Standing the robot up, which is how anything else here starts.**
         //
@@ -613,10 +615,6 @@ mod tests {
                 // person approving the code is holding the phone that is bonded to the robot.
                 proto::method::ACCOUNT_LOGIN,
                 proto::method::ACCOUNT_LOGOUT,
-                // Sharing the vet book publishes under that account, so it rides the same claim:
-                // the phone bonded in the room, which is also where the share sheet that posts
-                // the card lives.
-                proto::method::VETBOOK_SHARE,
                 proto::method::NET_CONNECT,
                 proto::method::NET_FORGET,
                 proto::method::SYSTEM_SET_NAME,

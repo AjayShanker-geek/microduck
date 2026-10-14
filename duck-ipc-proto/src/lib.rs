@@ -463,7 +463,14 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// [`method::VETBOOK_SHARE`]: `updaterd` publishes the vet book to a public dataset on the signed-in
 /// Hugging Face account, `<user>/<robot name>-vetbook`, and answers with the link to its card
 /// ([`VetbookShareResult`]). A new route: an `updaterd` predating it answers METHOD_NOT_FOUND.
-pub const API_VERSION: u32 = 43;
+///
+/// # v44 — records from every sensor
+///
+/// [`method::ROBOT_VETBOOK_TALLY`]: another daemon's counts and personal records — photos taken,
+/// laser sweep, nearest object — merged into the vet book by `robotd`, which owns it. The book
+/// gains three maps for them ([`vetbook::Life::tallies`], `highs`, `lows`), additive: an older
+/// book loads with them empty. A new route: a `robotd` predating it answers METHOD_NOT_FOUND.
+pub const API_VERSION: u32 = 44;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -793,6 +800,9 @@ pub mod method {
     pub const ROBOT_VETBOOK: &str = "robot.vetbook";
     /// A dated line of free text in the vet book. Kept for the life of the robot.
     pub const ROBOT_VETBOOK_NOTE: &str = "robot.vetbookNote";
+    /// Another daemon's counts and records since its last report, for the vet book — see
+    /// [`crate::vetbook::VetbookTallyParams`]. Local daemons only.
+    pub const ROBOT_VETBOOK_TALLY: &str = "robot.vetbookTally";
 
     /// Put a different `.onnx` in one slot, or drop an override and go back to the default.
     ///
@@ -1122,6 +1132,8 @@ pub enum Call {
     RobotVetbook,
     /// Write a note in it; see [`method::ROBOT_VETBOOK_NOTE`].
     RobotVetbookNote(vetbook::VetbookNoteParams),
+    /// Add another daemon's counts to it; see [`method::ROBOT_VETBOOK_TALLY`].
+    RobotVetbookTally(vetbook::VetbookTallyParams),
     /// Load one slot, or reset it; see [`method::ROBOT_LOAD_POLICY`].
     RobotLoadPolicy(LoadPolicyParams),
     /// Re-read every slot from disk; see [`method::ROBOT_RELOAD_POLICIES`].
@@ -1295,6 +1307,7 @@ impl Call {
             Call::RobotModel => method::ROBOT_MODEL,
             Call::RobotVetbook => method::ROBOT_VETBOOK,
             Call::RobotVetbookNote(_) => method::ROBOT_VETBOOK_NOTE,
+            Call::RobotVetbookTally(_) => method::ROBOT_VETBOOK_TALLY,
             Call::RobotLoadPolicy(_) => method::ROBOT_LOAD_POLICY,
             Call::RobotReloadPolicies => method::ROBOT_RELOAD_POLICIES,
             Call::PolicyCheck => method::POLICY_CHECK,
@@ -1378,10 +1391,10 @@ impl Call {
                 // `account.status` is a read and stays ungated — a support engineer should be
                 // able to ask which account a robot thinks it belongs to.
                 | Call::AccountLogin(_)
-                | Call::AccountLogout
-                // Sharing publishes, in public and under the owner's name, something this robot
-                // knows about itself. Gated like signing in, since it acts as the account.
-                | Call::VetbookShare
+                | Call::AccountLogout // Not `vetbook.share`. It changes nothing on the robot, and it publishes under an
+                                      // account root already signed in — with a token the `robot` group can read, so
+                                      // this gate would protect nothing and only put `sudo` in front of a share button.
+                                      // Which transports may carry it is the route tables' decision, not this one.
         )
     }
 
@@ -1464,6 +1477,8 @@ impl Call {
             | Call::RobotMode => (Robot, Prompt),
             // A small write to a file `robotd` already owns, done on the IPC side.
             Call::RobotVetbookNote(_) => (Robot, Prompt),
+            // A merge into the book under its lock, and nothing else.
+            Call::RobotVetbookTally(_) => (Robot, Prompt),
             // Intents and one-shot skills. All fast: they store a value the control loop reads on
             // its next tick, and none of them waits for the robot to finish anything.
             Call::RobotMove(_)
@@ -1598,6 +1613,7 @@ impl Call {
             Call::RobotSound(p) => encode(p),
             Call::RobotFlashlight(p) => encode(p),
             Call::RobotVetbookNote(p) => encode(p),
+            Call::RobotVetbookTally(p) => encode(p),
             Call::RobotTheremin(p) => encode(p),
             Call::RobotChorale(p) => encode(p),
             Call::ChoraleBeaconSet(p) => encode(p),
@@ -1705,6 +1721,7 @@ impl Call {
             method::ROBOT_MODEL => Call::RobotModel,
             method::ROBOT_VETBOOK => Call::RobotVetbook,
             method::ROBOT_VETBOOK_NOTE => Call::RobotVetbookNote(decode(params)?),
+            method::ROBOT_VETBOOK_TALLY => Call::RobotVetbookTally(decode(params)?),
             method::ROBOT_LOAD_POLICY => Call::RobotLoadPolicy(decode(params)?),
             method::ROBOT_RELOAD_POLICIES => Call::RobotReloadPolicies,
             method::POLICY_CHECK => Call::PolicyCheck,
@@ -1872,6 +1889,10 @@ pub mod test_support {
             Call::RobotVetbook,
             Call::RobotVetbookNote(vetbook::VetbookNoteParams {
                 text: "reglued the beak".into(),
+            }),
+            Call::RobotVetbookTally(vetbook::VetbookTallyParams {
+                tallies: [(vetbook::key::PHOTOS.to_owned(), 1.0)].into(),
+                ..Default::default()
             }),
             Call::RobotReloadPolicies,
             Call::PolicyCheck,
@@ -2851,7 +2872,8 @@ pub struct VetbookShareResult {
     pub image: String,
     /// The dataset the book was published to, `<user>/<robot name>-vetbook`.
     pub dataset: String,
-    /// Which of the cards this share drew: `notebook`, `purikura` or `profile`.
+    /// Which of the cards this share drew, as the Space names it: `notebook`, `purikura`,
+    /// `profile`, `receipt`, `passport`, `gameboy`, `polaroid` or `fifa`.
     pub card: String,
 }
 
@@ -5805,7 +5827,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            72,
+            73,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }
@@ -6028,8 +6050,6 @@ mod tests {
                 // which account a robot thinks it belongs to is the first thing support asks.
                 method::ACCOUNT_LOGIN,
                 method::ACCOUNT_LOGOUT,
-                // Sharing publishes in public under the owner's name, acting as the account.
-                method::VETBOOK_SHARE,
                 method::NET_CONNECT,
                 method::NET_FORGET,
                 method::SYSTEM_SET_NAME,
