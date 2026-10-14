@@ -196,6 +196,10 @@ impl VetbookTallyParams {
 /// Send `p` to `robotd` as `robot.vetbookTally`, and wait for its answer — at most `timeout` on
 /// each of connect, write and read. Blocking and std-only, for a daemon's reporting thread or a
 /// `spawn_blocking`; a daemon whose report fails keeps the counts and sends them with the next.
+///
+/// Unix only: the daemons that report run on the robot, and this crate is also built into
+/// `duckctl` for Windows, which has no Unix sockets and never reports.
+#[cfg(unix)]
 pub fn report(
     socket: &std::path::Path,
     p: &VetbookTallyParams,
