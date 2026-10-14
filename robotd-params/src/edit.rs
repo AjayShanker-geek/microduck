@@ -1181,6 +1181,7 @@ mod tests {
                 "safety",
                 "duck_detector",
                 "chorale",
+                "idle",
                 "pickup",
                 "theremin",
                 "head_imu",

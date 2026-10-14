@@ -2309,6 +2309,7 @@ async fn control_loop<T: RobotIo>(
     // The robot looking around while nothing is happening — see `idle_head`. Seeded from the
     // clock, so two robots side by side do not glance in step.
     let mut idle_head = idle_head::IdleHead::new(
+        params.idle,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64),
@@ -3145,7 +3146,7 @@ async fn control_loop<T: RobotIo>(
             && !pickup_paused
             && twist_target == [0.0; 3]
             && twist_ema.iter().all(|v| v.abs() < 1e-3)
-            && snapshot.head_age >= idle_head::IDLE_AFTER
+            && snapshot.head_age >= idle_head.after()
             && chorale_head.iter().all(|v| v.abs() < 1e-3)
             && controller.as_ref().is_some_and(|c| !c.busy());
         let idle = idle_head.tick(tick_start, still, period);
@@ -3787,12 +3788,14 @@ async fn control_loop<T: RobotIo>(
             }
         }
 
-        // The mouth is not part of any policy; the intent is the only thing that moves it.
+        // The mouth is not part of any policy; the intent, and the idle yawn, are what move it.
         // Only while driving — a held or homing robot keeps whatever its hold pose says, so
         // a restart cannot snap a mouth.
+        // An idle yawn opens it further than a client asked, never less: the yawn only runs
+        // while nothing asks the robot to move, and a client holding the beak open keeps it so.
         if driving && theremin_state.is_none() && chorale_state.is_none() {
             targets[duck_control::model::MOUTH_INDEX] =
-                duck_control::model::mouth_target(snapshot.mouth);
+                duck_control::model::mouth_target(snapshot.mouth.max(idle.mouth));
         }
 
         // The next feature row pairs its reading with this command.
