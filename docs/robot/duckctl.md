@@ -25,6 +25,14 @@ That runs the latest release, downloaded once and cached; nothing is compiled. T
 It is the build of the latest `daemon-v*` release, so it can be behind `main`;
 [`ci-setup.md`](../project/ci-setup.md#duckctl-on-pypi) has how it is published.
 
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install pierre-rouanet/tools/duckctl
+```
+
+`brew upgrade duckctl` moves it to each new release.
+
 For what a branch last built — `main` included — on Linux or macOS:
 
 ```bash
