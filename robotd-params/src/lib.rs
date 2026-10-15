@@ -19,6 +19,7 @@
 pub mod board;
 pub mod edit;
 pub mod registry;
+pub mod serial;
 
 pub mod pad_axes;
 pub use pad_axes::{PadAxesParams, PadBodyParams, PadHeadParams, PadRollerParams};

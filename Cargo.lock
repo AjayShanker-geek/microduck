@@ -751,6 +751,7 @@ dependencies = [
  "duck-ipc-proto",
  "futures",
  "libc",
+ "robotd-params",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4457,6 +4458,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hound",
+ "robotd-params",
  "sha2 0.11.0",
 ]
 

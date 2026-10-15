@@ -628,9 +628,9 @@ rolled back for the state of the board it landed on.
    manual escape. Needs an API and a rule about who may call it
    ([`app-path-design.md`](app-path-design.md) §5).
 7. **Per-device provisioning state** — the per-robot pairing PIN, and nothing else now. The serial
-   was the other claimant and no longer needs a slot: it is fused into the SoC and read from
-   `/proc/device-tree/serial-number` (`updater-design.md` §5.6,
-   [`app-path-design.md`](app-path-design.md) §8.2). The PIN cannot share the identity, which was
+   was the other claimant and no longer needs a slot: it is fused into the SoC
+   (`updater-design.md` §5.6, [`app-path-design.md`](app-path-design.md) §8.2 says where it is
+   read on each board). The PIN cannot share the identity, which was
    the plan: the identity is published in an advertisement, so anything derived from it is public.
    A secret still has to be generated, recorded and printed at manufacture.
 

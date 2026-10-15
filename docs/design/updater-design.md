@@ -438,8 +438,8 @@ What the updater keeps is deliberately minimal:
   before the board was a setting carries `hw_rev = 1`, and a board provisioned against a
   release that still shipped it does too, so it cannot be allowed to outrank the board.
 - A **stable device ID** for the update log (§8.3) and any future phone-home. The
-  SoC serial (`/proc/device-tree/serial-number`) works and survives reflashes —
-  no provisioning step needed to obtain it.
+  SoC serial works and survives reflashes — no provisioning step needed to obtain
+  it. Where it is read differs per board ([`app-path-design.md`](app-path-design.md) §8.2).
 
 #### Retiring a board
 
