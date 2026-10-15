@@ -816,11 +816,19 @@ one nobody can use, and that stands on its own. §8.1 is tracked separately and 
 
 #### What a robot is called
 
-**Identity comes from the SoC serial**, read from `/proc/device-tree/serial-number` and reported by
-`system.info` (`configd::identity`). Fused into the chip and handed over by the bootloader, so it
-survives a reflash, survives swapping the radio module, and needs no provisioning step to exist —
+**Identity comes from the SoC serial**, reported by `system.info` (`configd::identity`). Fused into
+the chip, so it survives a reflash, survives swapping the radio module, and needs no provisioning step to exist —
 which is what keeps a hand-flashed board working. It is also a plain file read: no root, no D-Bus,
 and available immediately rather than after the ~73 seconds `hci0` takes to appear.
+
+**Where it is read depends on the board** (`robotd_params::serial`). Rockchip's serial is a CRC of
+sixteen bytes of the SoC's OTP, computed twice: by U-Boot, into the device tree's `serial-number`,
+and by the kernel, into `/proc/cpuinfo`'s `Serial`. A zero3 reads the device tree, which is what
+every Zero 3W's name was made from. A beta reads `/proc/cpuinfo`: the beta image's U-Boot reads the
+OTP three bytes early (0x07, not 0x0a), stops just short of the per-chip bytes, and gives every chip
+in a lot the same serial — the first two beta boards were both `duck-d041`. The voice and the chorale
+id are seeded from the same value (`sounds::hardware_seed`), so they had collided too; and a beta
+whose kernel prints no `Serial` has no serial rather than the lot's.
 
 This is not a new idea in this repository, which is worth saying: `updater-design.md` §5.6 already
 picked the same value as the update log's stable device ID, for the same reason — it works and needs
