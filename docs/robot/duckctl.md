@@ -674,10 +674,11 @@ the list of skills.
 duckctl udp-pad
 ```
 
-Reads the first gamepad plugged into this machine and sends its state to a duck whose
+Sends the state of the gamepad a button is pressed on (or `--pad N`) to a duck whose
 `[netpad] enabled` is true. The address is found the way `ip` finds it, so `--name` picks the robot;
 give one instead (`duckctl udp-pad 192.168.1.42`) and no Bluetooth is involved at all. `--hz` (10 to 100, default 30) is the most it
-sends a second. It is a LAN tool, and [`udp-pad.md`](udp-pad.md) has the setup and the wire format.
+sends a second. One per duck drives several ducks from one laptop. It is a LAN tool, and
+[`udp-pad.md`](udp-pad.md) has the setup, several ducks, and the wire format.
 
 ## Anything else — `call`
 

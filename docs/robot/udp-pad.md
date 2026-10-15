@@ -85,7 +85,8 @@ Without an address it finds the robot over Bluetooth the way `duckctl ip` does, 
 duckctl udp-pad 192.168.1.42
 ```
 
-It reads the first gamepad plugged into the laptop and sends its state. A port on the end of the
+Press any button on the pad you want to drive with: that pad is the one it sends, until it is
+unplugged. The press itself is not sent as a press. A port on the end of the
 address (`duck.local:4210`) overrides the default, and `--hz` (10 to 100, default 30) is the most it
 will send a second. It sends the moment anything changes and otherwise a keepalive every `1/hz`, so
 the robot can tell a still pad from a gone one. With no pad on the laptop it sends nothing, and the
@@ -94,6 +95,30 @@ after `stale_ms`, and sits down a second after `timeout_ms`.
 
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
 before sending.
+
+### Several ducks from one laptop
+
+Plug in one pad per duck. Open one terminal per duck, and start one `udp-pad` in each, one at a time.
+
+In the first terminal:
+
+```bash
+duckctl udp-pad 192.168.1.42
+```
+
+Press a button on the pad for that duck. Its block now shows the pad's name. In the second terminal:
+
+```bash
+duckctl udp-pad 192.168.1.43
+```
+
+Press a button on the second pad. And so on for each duck.
+
+A pad that already drives a duck is skipped: pressing it again says which duck it drives. If two
+`udp-pad`s wait at once, the second one waits until the first has its pad.
+
+`--pad 2` sends the second pad on the laptop without waiting for a press, for a script. The number
+is the order the laptop found the pads in, which can change when a pad is unplugged and plugged back.
 
 On a terminal it takes the screen, as `robotctl monitor` does, and `q` quits:
 
