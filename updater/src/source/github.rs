@@ -19,10 +19,12 @@ use crate::Error;
 use crate::manifest::Manifest;
 use crate::source::{FetchedArtifact, ProgressSink, SignedBytes, Source, http};
 
-/// Releases fetched per page when scanning for the newest tag. One page is plenty
-/// for any real channel; further pages are fetched only if a page comes back full.
-const PER_PAGE: usize = 100;
-const MAX_PAGES: usize = 5;
+/// Releases fetched per page when scanning for the newest tag; further pages are
+/// fetched only if a page comes back full. Each page must fit `http::MAX_METADATA_BYTES`
+/// (1 MiB), and a release with its 16 assets is ~31 KB of JSON: at 100 per page the
+/// listing outgrew the cap and every robot stopped updating (#421). 20 is ~620 KB.
+const PER_PAGE: usize = 20;
+const MAX_PAGES: usize = 25;
 
 /// The signature that accompanies every signed file.
 const SIG_SUFFIX: &str = ".minisig";
