@@ -195,7 +195,6 @@ DEV_KEY_KEPT="${STATE_DIR}/team.dev.pub"
 SETUP_SELF=/usr/local/sbin/robot-setup-board
 MIGRATE_SELF=/usr/local/sbin/robot-migrate-network
 GST_SELF=/usr/local/sbin/robot-setup-gstreamer
-RKAIQ_SELF=/usr/local/sbin/robot-setup-rkaiq
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -608,15 +607,16 @@ phase_two() {
     #
     # Two files, not one: the script builds an LD_PRELOAD shim from the C source beside it, and
     # fetching the script alone would leave it with nothing to compile.
+    #
+    # Always fetched, never the persisted copy the others prefer. Until 2026-10-17 that copy could
+    # not find its own shim source and died on every run, and a board keeps whichever copy it has
+    # until a release replaces it — so preferring it would leave every board provisioned once
+    # before the fix unable to finish a re-run. Phase 2 needs the network for install.sh anyway.
     if [ -n "$RKAIQ" ] && [ "$RKAIQ" != 0 ]; then
-        if [ -x "$RKAIQ_SELF" ]; then
-            "$RKAIQ_SELF"
-        else
-            tmp=/tmp/setup-rkaiq.sh
-            fetch setup-rkaiq.sh "$tmp"
-            fetch rkaiq-modinfo-shim.c /tmp/rkaiq-modinfo-shim.c
-            sh "$tmp"
-        fi
+        tmp=/tmp/setup-rkaiq.sh
+        fetch setup-rkaiq.sh "$tmp"
+        fetch rkaiq-modinfo-shim.c /tmp/rkaiq-modinfo-shim.c
+        sh "$tmp"
     fi
 
     # This run is what retires the wifi backstop. Left armed, any later boot where wifi is
