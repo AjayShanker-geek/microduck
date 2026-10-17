@@ -21,8 +21,8 @@ use crate::source::{FetchedArtifact, ProgressSink, SignedBytes, Source, http};
 
 /// Releases fetched per page when scanning for the newest tag. One page is plenty
 /// for any real channel; further pages are fetched only if a page comes back full.
-const PER_PAGE: usize = 100;
-const MAX_PAGES: usize = 5;
+const PER_PAGE: usize = 20;
+const MAX_PAGES: usize = 25;
 
 /// The signature that accompanies every signed file.
 const SIG_SUFFIX: &str = ".minisig";
