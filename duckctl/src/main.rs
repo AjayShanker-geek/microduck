@@ -497,8 +497,19 @@ fn deliver(command: &Command, address: &str) -> Result<(), Box<dyn std::error::E
             })
         }
         Command::UdpPad {
-            hz, invert_y, pad, ..
-        } => udp_pad::run(address, *hz, *invert_y, udp_pad::pick(*pad)),
+            hz,
+            invert_y,
+            pad,
+            mute,
+            voice,
+            ..
+        } => udp_pad::run(
+            address,
+            *hz,
+            *invert_y,
+            udp_pad::pick(*pad),
+            udp_pad::sound(*mute, *voice),
+        ),
         // `run` only calls this for the five above; every other command's answer is its JSON.
         _ => Err("this command does not resolve an address".into()),
     }
@@ -1155,6 +1166,14 @@ enum Command {
         /// button is pressed on — one `udp-pad` per duck, each claiming its own pad.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         pad: Option<u64>,
+        /// Keep this machine quiet. Without it, RT's quack and LT's wheee play from its default
+        /// audio output as well as from the duck.
+        #[arg(long)]
+        mute: bool,
+        /// Which voice this machine quacks in. Without it, a voice of its own, drawn on the first
+        /// run and kept in `duckctl/voice-seed` under the user's configuration directory.
+        #[arg(long, value_name = "SEED", conflicts_with = "mute")]
+        voice: Option<u32>,
     },
     /// Reboot it.
     Reboot,
@@ -1458,6 +1477,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         hz,
         invert_y,
         pad,
+        mute,
+        voice,
     } = &cli.command
     {
         // By hand, because clap's `conflicts_with` does not reach a global flag from a subcommand.
@@ -1467,7 +1488,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        return udp_pad::run(host, *hz, *invert_y, udp_pad::pick(*pad));
+        return udp_pad::run(
+            host,
+            *hz,
+            *invert_y,
+            udp_pad::pick(*pad),
+            udp_pad::sound(*mute, *voice),
+        );
     }
     // Read once, here, so everything below asks `target` rather than the environment: which robot
     // was chosen and who chose it is one decision, and a second reader of `DUCK_ROBOT` could

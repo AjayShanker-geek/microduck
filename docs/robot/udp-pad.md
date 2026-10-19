@@ -96,6 +96,26 @@ after `stale_ms`, and sits down a second after `timeout_ms`.
 If pushing the stick forward walks the robot backwards, add `--invert-y`: it flips both sticks' Y
 before sending.
 
+### The laptop quacks too
+
+RT's quack and LT's wheee play from the laptop's speakers as well as from the duck, through
+whatever output the laptop has selected. They follow the duck's rules: a quack cuts the one still
+playing, a quack during a ride is dropped, and the wheee loops while LT is held and stops when it
+is let go. The laptop plays them for the pad it sends, whether or not the duck is taking it.
+
+The laptop has a voice of its own, not the duck's: a duck's voice comes from its chip's serial,
+which the laptop cannot read. The first run picks a random voice and keeps its number in
+`duckctl/voice-seed` under your configuration directory (`~/.config` on Linux and macOS,
+`%APPDATA%` on Windows), so it is the same voice every time. The log says which:
+
+```
+quacking here too, in voice 813162435 — --voice N for another, --mute for none
+```
+
+`--voice 42` quacks in voice 42 for this run, and `--mute` plays nothing. Delete the file for a new
+voice. With no audio output, or on Linux without `libasound.so.2`, the log says
+`no sound on this machine` and the pad drives as before.
+
 ### Several ducks from one laptop
 
 Plug in one pad per duck. Open one terminal per duck, and start one `udp-pad` in each, one at a time.
