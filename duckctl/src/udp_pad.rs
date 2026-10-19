@@ -9,7 +9,8 @@
 //! Which pad is the one sent is `--pad N`, or else the first pad a button is pressed on, so that
 //! several instances on one laptop each drive their own duck with their own pad (`claim.rs`).
 //!
-//! The quack and the wheee play from this laptop too, in a voice of its own (`voice.rs`).
+//! The quack and the wheee play from this laptop, in a voice of its own (`voice.rs`), and the
+//! duck only opens its mouth for them (`wire::SENDER_SOUNDS`) unless `--robot-sound-on`.
 
 use std::hash::{BuildHasher, Hasher};
 use std::net::UdpSocket;
@@ -347,6 +348,7 @@ pub fn run(
     invert_y: bool,
     pick: Pick,
     sound: Sound,
+    robot_sound: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut gilrs = Gilrs::new().map_err(|e| format!("no gamepad subsystem: {e}"))?;
     let mut claims =
@@ -406,6 +408,17 @@ pub fn run(
                 }
             }
         }
+    };
+    if voice.is_none() && !robot_sound {
+        say(
+            &mut screen,
+            "the triggers make no sound anywhere — --robot-sound-on for the duck's".to_owned(),
+        );
+    }
+    let flags = if robot_sound {
+        0
+    } else {
+        pad_map::wire::SENDER_SOUNDS
     };
     let mut triggers = voice::Triggers::default();
 
@@ -534,6 +547,7 @@ pub fn run(
             if pacer.due(now) {
                 seq = seq.wrapping_add(1);
                 packet.seq = seq;
+                packet.flags = flags;
                 // A refused send (no route yet, the duck rebooting, netpadd not running) is not
                 // fatal: the next one tries again. Said once, not per packet — see `Notices`.
                 let result = socket.send(&packet.encode());

@@ -502,6 +502,7 @@ fn deliver(command: &Command, address: &str) -> Result<(), Box<dyn std::error::E
             pad,
             mute,
             voice,
+            robot_sound_on,
             ..
         } => udp_pad::run(
             address,
@@ -509,6 +510,7 @@ fn deliver(command: &Command, address: &str) -> Result<(), Box<dyn std::error::E
             *invert_y,
             udp_pad::pick(*pad),
             udp_pad::sound(*mute, *voice),
+            *robot_sound_on,
         ),
         // `run` only calls this for the five above; every other command's answer is its JSON.
         _ => Err("this command does not resolve an address".into()),
@@ -1174,6 +1176,10 @@ enum Command {
         /// run and kept in `duckctl/voice-seed` under the user's configuration directory.
         #[arg(long, value_name = "SEED", conflicts_with = "mute")]
         voice: Option<u32>,
+        /// Have the duck quack and wheee too. Without it the duck only opens its mouth, and the
+        /// sound is this machine's.
+        #[arg(long)]
+        robot_sound_on: bool,
     },
     /// Reboot it.
     Reboot,
@@ -1479,6 +1485,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         pad,
         mute,
         voice,
+        robot_sound_on,
     } = &cli.command
     {
         // By hand, because clap's `conflicts_with` does not reach a global flag from a subcommand.
@@ -1494,6 +1501,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             *invert_y,
             udp_pad::pick(*pad),
             udp_pad::sound(*mute, *voice),
+            *robot_sound_on,
         );
     }
     // Read once, here, so everything below asks `target` rather than the environment: which robot
